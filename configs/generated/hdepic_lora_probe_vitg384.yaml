@@ -1,7 +1,7 @@
 nodes: 1
 tasks_per_node: 1
 cpus_per_task: 12
-tag: hdepic-lora-binary-input-adapter-DEBUG_SUBSET-l40-valw0-step80
+tag: hdepic-lora-vitg16-384-cleanp01-refmetrics
 eval_name: app.hdepic_lora_action_anticipation
 folder: /path/to/VJEPA2-EXP/outputs/hdepic_lora_action_anticipation
 resume_checkpoint: false
@@ -35,7 +35,6 @@ experiment:
     train_anticipation_time_sec:
     - 0.25
     - 1.75
-    val_num_workers: 0
     clip_balanced: true
   optimization:
     num_epochs: 1
@@ -45,14 +44,14 @@ experiment:
     multihead_kwargs:
     - weight_decay: 0.0001
       final_weight_decay: 0.0001
-      lr: 0.002
-      start_lr: 0.002
+      lr: 0.005
+      start_lr: 0.005
       final_lr: 0.0
       warmup: 0.0
     - weight_decay: 0.0001
       final_weight_decay: 0.0001
-      lr: 0.002
-      start_lr: 0.002
+      lr: 0.003
+      start_lr: 0.003
       final_lr: 0.0
       warmup: 0.0
     - weight_decay: 0.0001
@@ -75,14 +74,14 @@ experiment:
       warmup: 0.0
     - weight_decay: 0.001
       final_weight_decay: 0.001
-      lr: 0.002
-      start_lr: 0.002
+      lr: 0.005
+      start_lr: 0.005
       final_lr: 0.0
       warmup: 0.0
     - weight_decay: 0.001
       final_weight_decay: 0.001
-      lr: 0.002
-      start_lr: 0.002
+      lr: 0.003
+      start_lr: 0.003
       final_lr: 0.0
       warmup: 0.0
     - weight_decay: 0.001
@@ -105,14 +104,14 @@ experiment:
       warmup: 0.0
     - weight_decay: 0.01
       final_weight_decay: 0.01
-      lr: 0.002
-      start_lr: 0.002
+      lr: 0.005
+      start_lr: 0.005
       final_lr: 0.0
       warmup: 0.0
     - weight_decay: 0.01
       final_weight_decay: 0.01
-      lr: 0.002
-      start_lr: 0.002
+      lr: 0.003
+      start_lr: 0.003
       final_lr: 0.0
       warmup: 0.0
     - weight_decay: 0.01
@@ -135,14 +134,14 @@ experiment:
       warmup: 0.0
     - weight_decay: 0.1
       final_weight_decay: 0.1
-      lr: 0.002
-      start_lr: 0.002
+      lr: 0.005
+      start_lr: 0.005
       final_lr: 0.0
       warmup: 0.0
     - weight_decay: 0.1
       final_weight_decay: 0.1
-      lr: 0.002
-      start_lr: 0.002
+      lr: 0.003
+      start_lr: 0.003
       final_lr: 0.0
       warmup: 0.0
     - weight_decay: 0.1
@@ -171,13 +170,15 @@ experiment:
     train_heads: true
     pretrained_probe: /path/to/VJEPA2-EXP/outputs/ek100_vitg384_probe/action_anticipation_frozen/ek100-vitg16-384/latest.pt
     align_reference_metrics: true
+    val_metric_scope: native
     gaze:
-      mode: binary_input_adapter
+      mode: none
       gaze_root: /path/to/VJEPA2-EXP/data/raw/HD-EPIC/SLAM-and-Gaze
       extract_root: /path/to/VJEPA2-EXP/outputs/hdepic_gaze_token_gate/extracted
       sync_root: /path/to/VJEPA2-EXP/data/raw/HD-EPIC/HD-EPIC/Videos
       gamma: 0.7
       sigma_px: 40.0
+      learnable_gate: true
       use_motion: false
       traj_len: 1024
       rnn:
@@ -198,10 +199,11 @@ experiment:
         enabled: false
         max_batches: 4
       binary_radius_px: 64.0
+      binary_map_type: binary
       fallback_full_frame: false
       force_zero_map: false
       aug_aware: false
-      disable_train_aug: true
+      disable_train_aug: false
       input_adapter:
         hidden_dim: 8
         scale: 1.0
@@ -210,12 +212,28 @@ experiment:
         residual_clamp: 1.0
         lr_mult: 0.05
         weight_decay: 0.0001
-        activation_checkpointing: true
+        activation_checkpointing: false
+        in_channels: 4
+      pose_map:
+        patch_height: 128
+        patch_width: 16
+        layout: topleft
+        normalize: none
+        force_zero_pose: false
       encoder_output_adapter:
         num_heads: 4
         dropout: 0.0
         lr_mult: 0.05
         weight_decay: 0.0001
+      pose:
+        enabled: false
+        slam_root: /path/to/VJEPA2-EXP/data/raw/HD-EPIC/SLAM-and-Gaze/P01/SLAM/multi
+        mapping_json: /path/to/VJEPA2-EXP/data/raw/HD-EPIC/SLAM-and-Gaze/P01/SLAM/multi/vrs_to_multi_slam.json
+        trajectory_file: closed_loop_trajectory.csv
+        feature_set: pose_6d
+        quality_min: 0.0
+        history_sec: 0.0
+        interframe_k_max: 128
     prediction_dump:
       enabled: false
 model_kwargs:

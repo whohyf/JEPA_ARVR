@@ -174,7 +174,7 @@ experiment:
       mode: encoder_output_inject
       gaze_root: /path/to/VJEPA2-EXP/data/raw/HD-EPIC/SLAM-and-Gaze
       extract_root: /path/to/VJEPA2-EXP/outputs/hdepic_gaze_token_gate/extracted
-      sync_root: /path/to/VJEPA2-EXP/data/raw/HD-EPIC/HD-EPIC/Videos
+      sync_root: /path/to/VJEPA2-EXP/data/raw/HD-EPIC/Videos
       gamma: 0.7
       sigma_px: 40.0
       use_motion: false

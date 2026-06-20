@@ -94,6 +94,39 @@ def feature_dim_for_set(feature_set: str) -> int:
     raise ValueError(f"Unknown pose feature_set={feature_set!r}")
 
 
+def window_smooth_pose_matrix(feats: np.ndarray, k_max: int) -> np.ndarray:
+    """Fit a pose segment ``[N, D]`` to ``[K_max, D]`` using contiguous-window means.
+
+    When SLAM has a higher sample rate than the target matrix, this reduces the
+    pose rate by averaging over temporal windows instead of picking or truncating
+    samples. Short segments are copied then zero-padded.
+    """
+    d = int(feats.shape[1]) if feats.ndim == 2 and feats.size else 0
+    if d == 0:
+        raise ValueError("window_smooth_pose_matrix expects feats with shape [N, D] and D > 0")
+    out = np.zeros((int(k_max), d), dtype=np.float32)
+    if feats.size == 0:
+        return out
+    feats = feats.astype(np.float32, copy=False)
+    n = int(feats.shape[0])
+    if n <= int(k_max):
+        out[:n] = feats
+        return out
+    edges = np.linspace(0, n, int(k_max) + 1)
+    for idx in range(int(k_max)):
+        lo = int(np.floor(edges[idx]))
+        hi = int(np.floor(edges[idx + 1]))
+        if hi <= lo:
+            hi = min(n, lo + 1)
+        out[idx] = feats[lo:hi].mean(axis=0, dtype=np.float32)
+    return out
+
+
+def pad_or_truncate_pose_matrix(feats: np.ndarray, k_max: int) -> np.ndarray:
+    """Backward-compatible alias for the smoothed fixed-size pose matrix."""
+    return window_smooth_pose_matrix(feats, k_max)
+
+
 def build_pose_features(
     translation: np.ndarray,
     quaternion: np.ndarray,
@@ -229,6 +262,9 @@ class SlamPoseLoader:
         self.gate = gate or GazeTokenGate({"mode": "none", "gaze_root": cfg.get("gaze_root")})
         self._session_map: dict[str, str] | None = None
         self._inner_path_cache: dict[str, str] = {}
+        self._session_record_cache: dict[str, PoseRecord | None] = {}
+        self._sync_cache: dict[str, pd.DataFrame | None] = {}
+        self.cache_sessions = bool(cfg.get("cache_sessions", True))
 
     @property
     def input_dim(self) -> int:
@@ -333,6 +369,55 @@ class SlamPoseLoader:
             return None
         return _concat_records(parts)
 
+    def _load_full_session_record(self, zip_path: Path, inner: str, session_id: str) -> PoseRecord | None:
+        """Load and cache the full SLAM trajectory for a session (amortize zip reads)."""
+        if session_id in self._session_record_cache:
+            return self._session_record_cache[session_id]
+        rec: PoseRecord | None = None
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                with zf.open(inner) as fh:
+                    df = pd.read_csv(
+                        io.TextIOWrapper(fh, encoding="utf-8"),
+                        usecols=lambda c: c in USECOLS,
+                    )
+            rec = _dataframe_to_pose_record(df, self.quality_min)
+        except Exception as exc:
+            logger.warning("Failed loading SLAM trajectory from %s: %s", zip_path, exc)
+        self._session_record_cache[session_id] = rec
+        return rec
+
+    @staticmethod
+    def _slice_record(record: PoseRecord, q0_us: float, q1_us: float) -> PoseRecord | None:
+        ts = record.timestamps_us
+        mask = (ts >= q0_us) & (ts <= q1_us)
+        if not mask.any():
+            return None
+        idx = np.where(mask)[0]
+        return PoseRecord(
+            timestamps_us=ts[idx],
+            translation=record.translation[idx],
+            quaternion=record.quaternion[idx],
+            angular_vel=record.angular_vel[idx] if record.angular_vel is not None else None,
+            linear_vel=record.linear_vel[idx] if record.linear_vel is not None else None,
+            quality=record.quality[idx] if record.quality is not None else None,
+        )
+
+    def _sync_for_video(self, video_id: str) -> pd.DataFrame | None:
+        clean_id = _clean_video_id(video_id)
+        if clean_id in self._sync_cache:
+            return self._sync_cache[clean_id]
+        sync = None
+        if self.gate.sync_root is not None:
+            sync_path = _find_first(
+                self.gate.sync_root,
+                [f"{clean_id}_mp4_to_vrs_time_ns.csv", f"*{clean_id}*mp4_to_vrs_time_ns.csv"],
+            )
+            if sync_path is not None:
+                sync = pd.read_csv(sync_path)
+        self._sync_cache[clean_id] = sync
+        return sync
+
     def _clip_time_us(self, meta) -> tuple[float, float] | None:
         frame_indices = meta.get("frame_indices")
         if frame_indices is None:
@@ -354,15 +439,7 @@ class SlamPoseLoader:
             mp4_t0_ns = float(frame_indices.min()) / vfps * 1e9
 
         video_id = str(meta.get("video_id"))
-        clean_id = _clean_video_id(video_id)
-        sync = None
-        if self.gate.sync_root is not None:
-            sync_path = _find_first(
-                self.gate.sync_root,
-                [f"{clean_id}_mp4_to_vrs_time_ns.csv", f"*{clean_id}*mp4_to_vrs_time_ns.csv"],
-            )
-            if sync_path is not None:
-                sync = pd.read_csv(sync_path)
+        sync = self._sync_for_video(video_id)
 
         if sync is not None and {"mp4_time_ns", "vrs_device_time_ns"}.issubset(sync.columns):
             sync_mp4 = sync["mp4_time_ns"].to_numpy(dtype=np.float64)
@@ -373,8 +450,8 @@ class SlamPoseLoader:
             q_us = np.array([mp4_t0_ns, mp4_t1_ns]) / 1000.0
         return float(q_us[0]), float(q_us[1])
 
-    def query_clip_features(self, meta) -> np.ndarray | None:
-        """Return pose feature trajectory ``[N, D]`` for one clip metadata dict."""
+    def _load_clip_record(self, meta) -> PoseRecord | None:
+        """Load SLAM pose samples for the clip observed-context window."""
         video_id = str(meta.get("video_id"))
         session_id = self.resolve_session_id(video_id)
         if session_id is None:
@@ -389,8 +466,97 @@ class SlamPoseLoader:
         if window is None:
             return None
         q0, q1 = window
-        record = self._stream_pose_window(zip_path, inner, q0, q1)
+        if self.cache_sessions:
+            full = self._load_full_session_record(zip_path, inner, session_id)
+            record = None if full is None else self._slice_record(full, q0, q1)
+        else:
+            record = self._stream_pose_window(zip_path, inner, q0, q1)
         if record is None or record.timestamps_us.size < 2:
+            return None
+        return record
+
+    def frame_timestamps_us(self, meta) -> np.ndarray | None:
+        """Map each clip ``frame_indices`` entry to VRS/device time in microseconds."""
+        frame_indices = meta.get("frame_indices")
+        if frame_indices is None:
+            return None
+        if hasattr(frame_indices, "detach"):
+            frame_indices = frame_indices.detach().cpu().numpy()
+        frame_indices = np.asarray(frame_indices, dtype=np.float64)
+        vfps = meta.get("vfps", 30.0)
+        if hasattr(vfps, "detach"):
+            vfps = float(vfps.detach().cpu())
+        vfps = float(vfps)
+        if frame_indices.size < 2 or vfps <= 0:
+            return None
+
+        mp4_ns = frame_indices / vfps * 1e9
+        video_id = str(meta.get("video_id"))
+        sync = self._sync_for_video(video_id)
+        if sync is not None and {"mp4_time_ns", "vrs_device_time_ns"}.issubset(sync.columns):
+            vrs_ns = np.interp(
+                mp4_ns,
+                sync["mp4_time_ns"].to_numpy(dtype=np.float64),
+                sync["vrs_device_time_ns"].to_numpy(dtype=np.float64),
+            )
+            return (vrs_ns / 1000.0).astype(np.float64)
+        return (mp4_ns / 1000.0).astype(np.float64)
+
+    @staticmethod
+    def _slice_record_interval(record: PoseRecord, t0_us: float, t1_us: float) -> PoseRecord | None:
+        ts = record.timestamps_us
+        mask = (ts >= t0_us) & (ts < t1_us)
+        if not mask.any():
+            return None
+        idx = np.where(mask)[0]
+        return PoseRecord(
+            timestamps_us=ts[idx],
+            translation=record.translation[idx],
+            quaternion=record.quaternion[idx],
+            angular_vel=record.angular_vel[idx] if record.angular_vel is not None else None,
+            linear_vel=record.linear_vel[idx] if record.linear_vel is not None else None,
+            quality=record.quality[idx] if record.quality is not None else None,
+        )
+
+    def query_interframe_matrices(self, meta, k_max: int) -> np.ndarray | None:
+        """Return inter-frame pose matrices ``[T_vid, K_max, D]`` aligned to video frames.
+
+        For frame ``i`` in ``0..T-2``, matrix ``i`` contains all SLAM samples in
+        ``[t(frame_i), t(frame_{i+1}))`` with interval-relative ``pose_*`` features.
+        Frame ``T-1`` is zero-padded.
+        """
+        record = self._load_clip_record(meta)
+        frame_ts = self.frame_timestamps_us(meta)
+        if record is None or frame_ts is None:
+            return None
+        t_vid = int(frame_ts.shape[0])
+        if t_vid < 2:
+            return None
+        k_max = int(k_max)
+        if k_max <= 0:
+            raise ValueError(f"interframe k_max must be positive, got {k_max}")
+        d = self.input_dim
+        out = np.zeros((t_vid, k_max, d), dtype=np.float32)
+        for i in range(t_vid - 1):
+            seg_record = self._slice_record_interval(record, float(frame_ts[i]), float(frame_ts[i + 1]))
+            if seg_record is None or seg_record.timestamps_us.size < 1:
+                continue
+            feats = build_pose_features(
+                seg_record.translation,
+                seg_record.quaternion,
+                seg_record.angular_vel,
+                seg_record.linear_vel,
+                self.feature_set,
+            )
+            if feats.size == 0:
+                continue
+            out[i] = window_smooth_pose_matrix(feats, k_max)
+        return out
+
+    def query_clip_features(self, meta) -> np.ndarray | None:
+        """Return pose feature trajectory ``[N, D]`` for one clip metadata dict."""
+        record = self._load_clip_record(meta)
+        if record is None:
             return None
         feats = build_pose_features(
             record.translation,

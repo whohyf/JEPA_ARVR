@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=VJEPA2-EXP__hdepic_lora_arval
-#SBATCH --account=torch_pr_674_tandon_advanced
+#SBATCH --account=your_slurm_account
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
@@ -46,7 +46,7 @@ MAX_ROLLOUT_STEPS="${MAX_ROLLOUT_STEPS:-512}"
 GAZE_MODE="${GAZE_MODE:-none}"
 GAZE_ROOT="${GAZE_ROOT:-${PROJECT_ROOT}/data/raw/HD-EPIC/SLAM-and-Gaze}"
 GAZE_EXTRACT_ROOT="${GAZE_EXTRACT_ROOT:-${PROJECT_ROOT}/outputs/hdepic_gaze_token_gate/extracted}"
-GAZE_SYNC_ROOT="${GAZE_SYNC_ROOT:-${PROJECT_ROOT}/data/raw/HD-EPIC/HD-EPIC/Videos}"
+GAZE_SYNC_ROOT="${GAZE_SYNC_ROOT:-${PROJECT_ROOT}/data/raw/HD-EPIC/Videos}"
 GAZE_GATE_GAMMA="${GAZE_GATE_GAMMA:-0.7}"
 GAZE_GATE_SIGMA_PX="${GAZE_GATE_SIGMA_PX:-40}"
 GAZE_LEARNABLE_GATE="${GAZE_LEARNABLE_GATE:-1}"

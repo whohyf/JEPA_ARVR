@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=VJEPA2-EXP__hdepic_future_latent_fm
-#SBATCH --account=torch_pr_674_tandon_advanced
+#SBATCH --account=your_slurm_account
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
@@ -28,6 +28,10 @@ CONFIG_PATH="${CONFIG_PATH:-${PROJECT_ROOT}/configs/generated/future_latent_comp
 OUT_DIR="${OUT_DIR:-${PROJECT_ROOT}/outputs/hdepic_lora_action_anticipation/future_latent_failure_modes}"
 HORIZON="${HORIZON:-10.0}"
 METHODS="${METHODS:-encoder,ar,oracle}"
+# When submitting via `sbatch --export=...`, Slurm treats commas as
+# separators between env assignments. To make custom method lists robust,
+# support semicolon-delimited METHOD values and convert them back to commas.
+METHODS="${METHODS//;/,}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-1}"
 EVAL_NUM_WORKERS="${EVAL_NUM_WORKERS:-2}"
 MAX_SAMPLES="${MAX_SAMPLES:-0}"

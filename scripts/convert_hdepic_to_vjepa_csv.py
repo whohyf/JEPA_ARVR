@@ -32,6 +32,13 @@ OUTPUT_COLUMNS = [
 ]
 
 
+# Canonical P01 fixed train/val/test video lists (project default split).
+P01_FIXED_SPLITS_DIR = Path(__file__).resolve().parent.parent / "data/hdepic_vjepa_annotations" / "splits"
+P01_FIXED_TRAIN_LIST = P01_FIXED_SPLITS_DIR / "p01_fixed_train_videos.txt"
+P01_FIXED_VAL_LIST = P01_FIXED_SPLITS_DIR / "p01_fixed_val_videos.txt"
+P01_FIXED_TEST_LIST = P01_FIXED_SPLITS_DIR / "p01_fixed_test_videos.txt"
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
@@ -69,6 +76,58 @@ def parse_args():
         "--val-name",
         default="HD_EPIC_val_vjepa.csv",
         help="Output validation CSV filename.",
+    )
+    parser.add_argument(
+        "--test-name",
+        default="HD_EPIC_test_vjepa.csv",
+        help="Output test CSV filename. Written only when the selected split defines test videos.",
+    )
+    parser.add_argument(
+        "--split-preset",
+        default="p01_fixed",
+        choices=["p01_fixed", "legacy", "custom_fixed"],
+        help=(
+            "Dataset split policy. p01_fixed uses the canonical fixed P01 "
+            "train/val/test video lists under data/hdepic_vjepa_annotations/splits/; "
+            "legacy preserves participant/random validation split; "
+            "custom_fixed uses --train-video-ids/--val-video-ids/--test-video-ids or their file forms."
+        ),
+    )
+    parser.add_argument(
+        "--train-video-ids",
+        nargs="*",
+        default=None,
+        help="Original HD-EPIC video ids for a custom fixed train split.",
+    )
+    parser.add_argument(
+        "--val-video-ids",
+        nargs="*",
+        default=None,
+        help="Original HD-EPIC video ids for a custom fixed validation split.",
+    )
+    parser.add_argument(
+        "--test-video-ids",
+        nargs="*",
+        default=None,
+        help="Original HD-EPIC video ids for a custom fixed test split.",
+    )
+    parser.add_argument(
+        "--train-video-list",
+        type=Path,
+        default=None,
+        help="Text file with one original HD-EPIC video id per line for custom fixed train split.",
+    )
+    parser.add_argument(
+        "--val-video-list",
+        type=Path,
+        default=None,
+        help="Text file with one original HD-EPIC video id per line for custom fixed validation split.",
+    )
+    parser.add_argument(
+        "--test-video-list",
+        type=Path,
+        default=None,
+        help="Text file with one original HD-EPIC video id per line for custom fixed test split.",
     )
     parser.add_argument(
         "--val-participants",
@@ -147,8 +206,18 @@ def parse_args():
         "--keep-secondary-actions",
         action="store_true",
         help=(
-            "Emit one row for every pair in main_action_classes. By default only the "
-            "first main action pair is used."
+            "With --label-source main_action_classes, emit one row for every pair. "
+            "By default only the first main action pair is used."
+        ),
+    )
+    parser.add_argument(
+        "--label-source",
+        default="primary_verb_noun",
+        choices=["primary_verb_noun", "main_action_classes"],
+        help=(
+            "Which HD-EPIC label fields to write to verb_class/noun_class. "
+            "primary_verb_noun matches the PhD reference code: verb_classes[0]/noun_classes[0]. "
+            "main_action_classes preserves the older converter behavior."
         ),
     )
     parser.add_argument(
@@ -182,6 +251,57 @@ def format_vjepa_video_id(video_id, participant_id, video_id_format):
     return video_id.replace("-", "_", 1)
 
 
+def normalize_original_video_id(video_id):
+    video_id = str(video_id).strip()
+    if not video_id:
+        return video_id
+    if "_" in video_id and "-" in video_id:
+        participant, rest = video_id.split("_", 1)
+        if participant.startswith("P"):
+            return f"{participant}-{rest}"
+    return video_id
+
+
+def read_video_id_list(path):
+    if path is None:
+        return []
+    values = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        values.append(line)
+    return values
+
+
+def split_video_ids_from_args(args):
+    if args.split_preset == "p01_fixed":
+        return {
+            "train": read_video_id_list(P01_FIXED_TRAIN_LIST),
+            "val": read_video_id_list(P01_FIXED_VAL_LIST),
+            "test": read_video_id_list(P01_FIXED_TEST_LIST),
+        }
+    if args.split_preset == "custom_fixed":
+        return {
+            "train": list(args.train_video_ids or []) + read_video_id_list(args.train_video_list),
+            "val": list(args.val_video_ids or []) + read_video_id_list(args.val_video_list),
+            "test": list(args.test_video_ids or []) + read_video_id_list(args.test_video_list),
+        }
+    return {"train": [], "val": [], "test": []}
+
+
+def _dedupe_video_ids(video_ids):
+    out = []
+    seen = set()
+    for video_id in video_ids:
+        clean = normalize_original_video_id(video_id)
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        out.append(clean)
+    return out
+
+
 def parse_action_pairs(value):
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return []
@@ -209,6 +329,33 @@ def parse_action_pairs(value):
             continue
         pairs.append((int(item[0]), int(item[1])))
     return pairs
+
+
+def primary_verb_noun_pair(row):
+    verb_classes = row["verb_classes"]
+    noun_classes = row["noun_classes"]
+    if isinstance(verb_classes, str):
+        verb_classes = ast.literal_eval(verb_classes)
+    if isinstance(noun_classes, str):
+        noun_classes = ast.literal_eval(noun_classes)
+    if hasattr(verb_classes, "tolist"):
+        verb_classes = verb_classes.tolist()
+    if hasattr(noun_classes, "tolist"):
+        noun_classes = noun_classes.tolist()
+    if not isinstance(verb_classes, list) or not isinstance(noun_classes, list):
+        return []
+    if not verb_classes or not noun_classes:
+        return []
+    return [(int(verb_classes[0]), int(noun_classes[0]))]
+
+
+def label_pairs_for_row(row, args):
+    if args.label_source == "primary_verb_noun":
+        return primary_verb_noun_pair(row)
+    action_pairs = parse_action_pairs(row["main_action_classes"])
+    if not args.keep_secondary_actions:
+        action_pairs = action_pairs[:1]
+    return action_pairs
 
 
 def resolve_video_path(video_root, participant_id, video_id, video_ext):
@@ -284,7 +431,11 @@ def build_rows(args):
     linked_videos = {}
     dropped_no_action = 0
 
-    required = {"video_id", "start_timestamp", "end_timestamp", "main_action_classes"}
+    required = {"video_id", "start_timestamp", "end_timestamp"}
+    if args.label_source == "primary_verb_noun":
+        required.update({"verb_classes", "noun_classes"})
+    else:
+        required.add("main_action_classes")
     missing_columns = sorted(required - set(annotations.columns))
     if missing_columns:
         raise ValueError(f"Missing required HD-EPIC columns: {missing_columns}")
@@ -297,12 +448,10 @@ def build_rows(args):
         LOGGER.info("Keeping %d annotation rows for participants %s", len(annotations), sorted(include_participants))
 
     for _, row in annotations.iterrows():
-        action_pairs = parse_action_pairs(row["main_action_classes"])
+        action_pairs = label_pairs_for_row(row, args)
         if not action_pairs:
             dropped_no_action += 1
             continue
-        if not args.keep_secondary_actions:
-            action_pairs = action_pairs[:1]
 
         video_id = str(row["video_id"])
         participant_id = get_participant_id(row)
@@ -364,32 +513,104 @@ def build_rows(args):
         "unique_verbs": int(len({row["verb_class"] for row in rows})),
         "unique_nouns": int(len({row["noun_class"] for row in rows})),
         "unique_actions": int(len({(row["verb_class"], row["noun_class"]) for row in rows})),
+        "label_source": args.label_source,
     }
     return pd.DataFrame(rows, columns=OUTPUT_COLUMNS), stats
 
 
-def split_dataframe(df, val_participants, val_ratio, seed):
+def split_dataframe(df, args):
     if df.empty:
         raise ValueError("No rows were converted; check annotations, video paths, and action fields.")
 
-    if val_participants:
-        val_participants = set(val_participants)
+    if args.split_preset in {"p01_fixed", "custom_fixed"}:
+        fixed_ids = split_video_ids_from_args(args)
+        train_ids = _dedupe_video_ids(fixed_ids["train"])
+        val_ids = _dedupe_video_ids(fixed_ids["val"])
+        test_ids = _dedupe_video_ids(fixed_ids["test"])
+        if args.split_preset == "p01_fixed" and (not train_ids or not val_ids or not test_ids):
+            raise ValueError(
+                "p01_fixed requires non-empty canonical train/val/test video lists at "
+                f"{P01_FIXED_SPLITS_DIR}; got train={len(train_ids)} val={len(val_ids)} test={len(test_ids)}"
+            )
+        overlap = (
+            (set(train_ids) & set(val_ids))
+            | (set(train_ids) & set(test_ids))
+            | (set(val_ids) & set(test_ids))
+        )
+        if overlap:
+            raise ValueError(f"Fixed split video ids overlap across splits: {sorted(overlap)}")
+        if not train_ids or not val_ids:
+            raise ValueError(
+                f"{args.split_preset} requires non-empty train and val video ids; "
+                f"got train={len(train_ids)} val={len(val_ids)}"
+            )
+
+        original_ids = df["original_video_id"].map(normalize_original_video_id)
+        train_mask = original_ids.isin(train_ids)
+        val_mask = original_ids.isin(val_ids)
+        test_mask = original_ids.isin(test_ids) if test_ids else pd.Series(False, index=df.index)
+        unmatched_mask = ~(train_mask | val_mask | test_mask)
+
+        train_df = df[train_mask].copy()
+        val_df = df[val_mask].copy()
+        test_df = df[test_mask].copy()
+        unmatched_df = df[unmatched_mask].copy()
+        if train_df.empty or val_df.empty:
+            raise ValueError(
+                f"Fixed split produced empty train or val set: train_rows={len(train_df)} val_rows={len(val_df)}"
+            )
+        missing_by_split = {
+            "train": sorted(set(train_ids) - set(original_ids[train_mask].unique())),
+            "val": sorted(set(val_ids) - set(original_ids[val_mask].unique())),
+            "test": sorted(set(test_ids) - set(original_ids[test_mask].unique())),
+        }
+        split_meta = {
+            "split_preset": args.split_preset,
+            "split_policy": (
+                "p01_fixed_video_lists"
+                if args.split_preset == "p01_fixed"
+                else "custom_fixed_video_lists"
+            ),
+            "participant_scope": "P01",
+            "train_video_ids": train_ids,
+            "val_video_ids": val_ids,
+            "test_video_ids": test_ids,
+            "missing_split_video_ids": missing_by_split,
+            "unmatched_rows": int(len(unmatched_df)),
+            "unmatched_videos": sorted(set(original_ids[unmatched_mask].unique())),
+        }
+        return train_df, val_df, test_df, split_meta
+
+    if args.val_participants:
+        val_participants = set(args.val_participants)
         val_mask = df["participant_id"].isin(val_participants)
         train_df, val_df = df[~val_mask].copy(), df[val_mask].copy()
         if not train_df.empty and not val_df.empty:
-            return train_df, val_df
+            split_meta = {
+                "split_preset": "legacy",
+                "split_policy": "participant",
+                "val_participants": sorted(val_participants),
+            }
+            return train_df, val_df, pd.DataFrame(columns=OUTPUT_COLUMNS), split_meta
         LOGGER.warning(
             "Participant split produced empty train or val set; falling back to video-level val_ratio=%s",
-            val_ratio,
+            args.val_ratio,
         )
 
-    rng = random.Random(seed)
+    rng = random.Random(args.seed)
     videos = sorted(df["video_id"].unique())
     rng.shuffle(videos)
-    num_val = max(1, int(round(len(videos) * val_ratio)))
+    num_val = max(1, int(round(len(videos) * args.val_ratio)))
     val_videos = set(videos[:num_val])
     val_mask = df["video_id"].isin(val_videos)
-    return df[~val_mask].copy(), df[val_mask].copy()
+    split_meta = {
+        "split_preset": "legacy",
+        "split_policy": "video_random_val_ratio",
+        "seed": int(args.seed),
+        "val_ratio": float(args.val_ratio),
+        "val_video_ids": sorted(val_videos),
+    }
+    return df[~val_mask].copy(), df[val_mask].copy(), pd.DataFrame(columns=OUTPUT_COLUMNS), split_meta
 
 
 def main():
@@ -397,27 +618,35 @@ def main():
     logging.basicConfig(level=getattr(logging, args.log_level), format="%(levelname)s: %(message)s")
 
     df, stats = build_rows(args)
-    train_df, val_df = split_dataframe(df, args.val_participants, args.val_ratio, args.seed)
+    train_df, val_df, test_df, split_meta = split_dataframe(df, args)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     train_path = args.output_dir / args.train_name
     val_path = args.output_dir / args.val_name
+    test_path = args.output_dir / args.test_name
     stats_path = args.output_dir / "conversion_stats.json"
 
     train_df.to_csv(train_path, index=False)
     val_df.to_csv(val_path, index=False)
+    if not test_df.empty:
+        test_df.to_csv(test_path, index=False)
     stats.update(
         {
             "train_rows": int(len(train_df)),
             "val_rows": int(len(val_df)),
+            "test_rows": int(len(test_df)),
             "train_videos": int(train_df["video_id"].nunique()),
             "val_videos": int(val_df["video_id"].nunique()),
+            "test_videos": int(test_df["video_id"].nunique()) if not test_df.empty else 0,
+            **split_meta,
         }
     )
     stats_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
 
     LOGGER.info("Wrote %s", train_path)
     LOGGER.info("Wrote %s", val_path)
+    if not test_df.empty:
+        LOGGER.info("Wrote %s", test_path)
     LOGGER.info("Wrote %s", stats_path)
     if stats["missing_videos"]:
         LOGGER.warning("Missing %d videos; see conversion_stats.json", len(stats["missing_videos"]))

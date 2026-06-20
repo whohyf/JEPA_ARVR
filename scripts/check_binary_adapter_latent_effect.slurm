@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=VJEPA2-EXP__binary_adapter_latent_effect
-#SBATCH --account=torch_pr_674_tandon_advanced
+#SBATCH --account=your_slurm_account
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:1
@@ -44,7 +44,8 @@ conda activate /ext3/envs/${ENV_NAME}
 export PYTHONPATH="${PROJECT_ROOT}:${VJEPA_ROOT}:${PYTHONPATH:-}"
 
 cd "${PROJECT_ROOT}"
-python scripts/check_binary_adapter_latent_effect.py \
+SCRIPT_PATH="${SCRIPT_PATH:-scripts/check_binary_adapter_latent_effect.py}"
+python "${SCRIPT_PATH}" \
   --config "${CONFIG_PATH}" \
   --out-dir "${OUT_DIR}" \
   --horizon "${HORIZON}" \

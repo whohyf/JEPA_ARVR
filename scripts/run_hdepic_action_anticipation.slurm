@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=VJEPA2-EXP__hdepic_aa_prep
-#SBATCH --account=torch_pr_674_tandon_advanced
+#SBATCH --account=your_slurm_account
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -42,9 +42,10 @@ EVAL_OUTPUT_DIR="${EVAL_OUTPUT_DIR:-${PROJECT_ROOT}/outputs/hdepic_action_antici
 
 DOWNLOAD_DATA="${DOWNLOAD_DATA:-1}"
 DOWNLOAD_PARTICIPANTS="${DOWNLOAD_PARTICIPANTS:-1,2}"
-INCLUDE_PARTICIPANTS="${INCLUDE_PARTICIPANTS:-}"
+INCLUDE_PARTICIPANTS="${INCLUDE_PARTICIPANTS:-P01}"
 VAL_PARTICIPANTS="${VAL_PARTICIPANTS-P02}"
 VAL_RATIO="${VAL_RATIO:-0.2}"
+HDEPIC_SPLIT_PRESET="${HDEPIC_SPLIT_PRESET:-p01_fixed}"
 CONVERT_FPS="${CONVERT_FPS:-30}"
 LINK_METHOD="${LINK_METHOD:-symlink}"
 
@@ -154,10 +155,11 @@ convert_args=(
     --skip-missing-videos
     --no-video-probe
     --fps "${CONVERT_FPS}"
+    --split-preset "${HDEPIC_SPLIT_PRESET}"
 )
-if [[ -n "${VAL_PARTICIPANTS}" ]]; then
+if [[ "${HDEPIC_SPLIT_PRESET}" == "legacy" && -n "${VAL_PARTICIPANTS}" ]]; then
     convert_args+=(--val-participants ${VAL_PARTICIPANTS})
-else
+elif [[ "${HDEPIC_SPLIT_PRESET}" == "legacy" ]]; then
     convert_args+=(--val-ratio "${VAL_RATIO}")
 fi
 if [[ -n "${INCLUDE_PARTICIPANTS}" ]]; then
@@ -196,6 +198,7 @@ data["file_format"] = 1
 data["base_path"] = os.environ["ADAPTED_VIDEO_ROOT"]
 data["dataset_train"] = str(Path(os.environ["ADAPTED_ANNOTATIONS_DIR"]) / "HD_EPIC_train_vjepa.csv")
 data["dataset_val"] = str(Path(os.environ["ADAPTED_ANNOTATIONS_DIR"]) / "HD_EPIC_val_vjepa.csv")
+data["dataset_test"] = str(Path(os.environ["ADAPTED_ANNOTATIONS_DIR"]) / "HD_EPIC_test_vjepa.csv")
 data["num_workers"] = int(os.environ["EVAL_NUM_WORKERS"])
 
 cfg["experiment"]["optimization"]["batch_size"] = int(os.environ["EVAL_BATCH_SIZE"])
@@ -246,7 +249,7 @@ export PROJECT_ROOT VJEPA_ROOT SIF OVERLAY ENV_NAME
 export DATA_ROOT RAW_DATA_PARENT HD_EPIC_ROOT ANNOTATIONS_REPO DOWNLOADER_REPO
 export ADAPTED_ANNOTATIONS_DIR ADAPTED_VIDEO_ROOT CONFIG_DIR CONFIG_PATH CHECKPOINT EVAL_OUTPUT_DIR
 export DOWNLOAD_DATA DOWNLOAD_PARTICIPANTS INCLUDE_PARTICIPANTS VAL_PARTICIPANTS LINK_METHOD
-export VAL_RATIO CONVERT_FPS
+export VAL_RATIO HDEPIC_SPLIT_PRESET CONVERT_FPS
 export EVAL_CPUS_PER_TASK EVAL_BATCH_SIZE EVAL_NUM_EPOCHS EVAL_NUM_WORKERS
 
 if [[ "${MODE}" == "prep" ]]; then
@@ -258,7 +261,7 @@ if [[ "${MODE}" == "prep" ]]; then
             --parsable
             --dependency="afterok:${SLURM_JOB_ID}"
             --job-name=VJEPA2-EXP__hdepic_aa_eval
-            --account=torch_pr_674_tandon_advanced
+            --account=your_slurm_account
             --nodes=1
             --ntasks=1
             --gres="gpu:${EVAL_GPUS}"

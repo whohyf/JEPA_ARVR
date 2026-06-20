@@ -99,6 +99,27 @@ def init_module(
         **wrapper_kwargs,
     )
     model.embed_dim = encoder.embed_dim
+    return_mode = wrapper_kwargs.get("return_mode", "observed_plus_target")
+    num_steps = int(wrapper_kwargs.get("num_steps", 1))
+    if num_steps > 1:
+        max_adv_sec = (
+            max(1, (getattr(predictor, "num_frames", 64) // encoder.tubelet_size) - max(1, (frames_per_clip // encoder.tubelet_size)))
+            * encoder.tubelet_size
+            / float(frames_per_second)
+        )
+        logger.info(
+            "[ar-rollout] sliding-window mode num_steps=%s (~%.2fs max advance/step); "
+            "NOT fine-grained 0.25s/chunk rollout (which needs ~41 steps @10s)",
+            num_steps,
+            max_adv_sec,
+        )
+    logger.info(
+        "[ar-rollout] AutoregressiveAnticipativeWrapper return_mode=%s | "
+        "final_window=probe gets last-N sliding window after AR (JEPA_ARVR anticipate_features); "
+        "observed_plus_target=encoder full + final target chunk (legacy default); "
+        "observed_plus_rollout=encoder full + all rollout chunks",
+        return_mode,
+    )
     if hasattr(predictor, "hierarchical_layers") and len(predictor.hierarchical_layers) > 1:
         encoder.return_hierarchical = True
     return model
@@ -143,6 +164,79 @@ class AutoregressiveAnticipativeWrapper(torch.nn.Module):
         if self.return_mode not in {"observed_plus_target", "target_only", "final_window", "observed_plus_rollout"}:
             raise ValueError(f"Unsupported return_mode={self.return_mode}")
 
+    def _max_advance_slots(self, context_tokens: int) -> int:
+        spatial_tokens = int(self.grid_size**2)
+        window_slots = max(1, context_tokens // spatial_tokens)
+        pred_num_frames = int(getattr(self.predictor, "num_frames", 64))
+        cap_slots = pred_num_frames // self.tubelet_size
+        return max(1, cap_slots - window_slots)
+
+    def _forward_sliding_window(self, x_full, anticipation_times, observed_for_classifier):
+        """JEPA_ARVR-style coarse AR: K predictor forwards, ~4s max advance per step."""
+        B, N, _ = x_full.size()
+        device = x_full.device
+        embed_dim = self.encoder.embed_dim
+        spatial_tokens = int(self.grid_size**2)
+        max_adv = self._max_advance_slots(N)
+
+        total_slabs = (
+            anticipation_times.float() * self.frames_per_second / self.tubelet_size
+        ).round().to(torch.int64).clamp(min=1)
+        k_steps = max(int(self.num_steps), 1)
+        k_steps = max(k_steps, int(((total_slabs.max() + max_adv - 1) // max_adv).item()))
+
+        ctx = x_full
+        ctx_pos = torch.arange(N, device=device).unsqueeze(0).expand(B, -1)
+        advanced = torch.zeros(B, dtype=torch.int64, device=device)
+        rollout_for_classifier = []
+        target_by_sample = [None for _ in range(B)]
+
+        for step_idx in range(1, k_steps + 1):
+            target_slabs = (total_slabs.float() * step_idx / k_steps).round().to(torch.int64)
+            adv = (target_slabs - advanced).clamp(min=0)
+            adv = torch.minimum(adv, torch.full_like(adv, max_adv))
+            adv_max = int(adv.max().item())
+            if adv_max <= 0:
+                continue
+
+            n_pred = spatial_tokens * adv_max
+            tgt_pos = torch.arange(n_pred, device=device).unsqueeze(0).expand(B, -1) + N
+            pred_out = self.predictor(ctx, masks_x=ctx_pos, masks_y=tgt_pos)
+            pred_full = pred_out[0] if isinstance(pred_out, tuple) else pred_out
+            pred_for_classifier = (
+                pred_full[:, :, -embed_dim:] if pred_full.size(-1) != embed_dim else pred_full
+            )
+            pred_for_input = pred_full if pred_full.size(-1) == ctx.size(-1) else pred_for_classifier
+
+            for b in range(B):
+                adv_b = int(adv[b].item())
+                if adv_b <= 0:
+                    continue
+                n_pred_b = spatial_tokens * adv_b
+                pred_b = pred_for_input[b : b + 1, :n_pred_b, :]
+                pred_cls_b = pred_for_classifier[b : b + 1, :n_pred_b, :]
+                rollout_for_classifier.append(pred_cls_b)
+                full = torch.cat([ctx[b : b + 1], pred_b], dim=1)
+                ctx[b : b + 1] = full[:, -N:, :]
+                advanced[b] += adv_b
+                if advanced[b] >= total_slabs[b]:
+                    target_by_sample[b] = pred_cls_b
+
+        if self.return_mode == "final_window":
+            return ctx[:, :, -embed_dim:] if ctx.size(-1) != embed_dim else ctx
+        if self.return_mode == "observed_plus_rollout":
+            return torch.cat([observed_for_classifier, *rollout_for_classifier], dim=1)
+
+        final_window = ctx[:, :, -embed_dim:] if ctx.size(-1) != embed_dim else ctx
+        target_candidates = [t for t in target_by_sample if t is not None]
+        target_tokens = final_window
+        if len(target_candidates) == B and len({t.size(1) for t in target_candidates}) == 1:
+            target_tokens = torch.cat(target_candidates, dim=0)
+
+        if self.return_mode == "target_only":
+            return target_tokens
+        return torch.cat([observed_for_classifier, target_tokens], dim=1)
+
     def forward(self, x, anticipation_times):
         x_full = self.encoder(x)
         if self.no_predictor:
@@ -157,6 +251,9 @@ class AutoregressiveAnticipativeWrapper(torch.nn.Module):
             observed_for_classifier = torch.rand(B, 0, embed_dim, device=x.device)
         else:
             observed_for_classifier = x_last_layer.clone()
+
+        if int(self.num_steps) > 1:
+            return self._forward_sliding_window(x_full, anticipation_times, observed_for_classifier)
 
         spatial_tokens = int(self.grid_size**2)
         chunk_tokens = int(spatial_tokens * (self.num_output_frames // self.tubelet_size))

@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=VJEPA2-EXP__dataloader_ddp_pressure_h100
-#SBATCH --account=torch_pr_674_tandon_advanced
+#SBATCH --account=your_slurm_account
 #SBATCH --partition=h100_tandon
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

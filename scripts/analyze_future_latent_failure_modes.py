@@ -414,6 +414,10 @@ def run(args):
             ar_target = None
             if "encoder" in methods:
                 tokens_by_method["encoder"] = observed_last
+            if "observed_plus_observed_tail" in methods:
+                tokens_by_method["observed_plus_observed_tail"] = torch.cat([observed_last, observed_tail], dim=1)
+            if "oracle_target_only" in methods:
+                tokens_by_method["oracle_target_only"] = oracle_target
             if "oracle" in methods:
                 tokens_by_method["oracle"] = torch.cat([observed_last, oracle_target], dim=1)
             if "ar" in methods:

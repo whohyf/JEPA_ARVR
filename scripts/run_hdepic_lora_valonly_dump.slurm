@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=VJEPA2-EXP__hdepic_lora_valonly_dump
-#SBATCH --account=torch_pr_674_tandon_advanced
+#SBATCH --account=your_slurm_account
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:a100:1
@@ -28,7 +28,9 @@ set -euo pipefail
 #   ANTICIPATION_SEC=1.0   override anticipation_time_sec for both ends
 #   EVAL_BATCH_SIZE=1
 #   EVAL_VAL_NUM_WORKERS=2
-#   DUMP_PATH=/abs/path/val_predictions.csv  override default dump path
+#   LORA_VAL_METRIC_SCOPE=native
+#   LORA_VAL_METRIC_AGGREGATION=single_head
+#   VAL_FIXED_HEAD_INDEX=3   # optional; omit to auto-pick head by action Top-3 under scope
 #   MODEL_MODULE_NAME=...  override the model wrapper, e.g. AR rollout at 10s
 #   MODEL_MAX_ROLLOUT_STEPS=512
 #   BINARY_INPUT_ADAPTER_LOAD_CHECKPOINT=/abs/path/binary_input_adapter_latest.pt
@@ -47,15 +49,23 @@ EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-1}"
 EVAL_VAL_NUM_WORKERS="${EVAL_VAL_NUM_WORKERS:-2}"
 DUMP_PATH="${DUMP_PATH:-}"
 LORA_VAL_METRIC_SCOPE="${LORA_VAL_METRIC_SCOPE:-native}"
+LORA_VAL_METRIC_AGGREGATION="${LORA_VAL_METRIC_AGGREGATION:-metric_wise_max}"
+VAL_FIXED_HEAD_INDEX="${VAL_FIXED_HEAD_INDEX:-}"
 MODEL_MODULE_NAME="${MODEL_MODULE_NAME:-}"
 MODEL_MAX_ROLLOUT_STEPS="${MODEL_MAX_ROLLOUT_STEPS:-}"
 BINARY_INPUT_ADAPTER_LOAD_CHECKPOINT="${BINARY_INPUT_ADAPTER_LOAD_CHECKPOINT:-}"
+BINARY_INPUT_ADAPTER_FORCE_ZERO_MAP="${BINARY_INPUT_ADAPTER_FORCE_ZERO_MAP:-0}"
+POSE_MAP_FORCE_ZERO="${POSE_MAP_FORCE_ZERO:-0}"
+VALDUMP_PREDICTION_DUMP="${VALDUMP_PREDICTION_DUMP:-1}"
 
 mkdir -p "${PROJECT_ROOT}/logs" "${CONFIG_DIR}"
 
 export PROJECT_ROOT VJEPA_ROOT SIF OVERLAY ENV_NAME
-export SOURCE_YAML VAL_TAG CONFIG_DIR ANTICIPATION_SEC EVAL_BATCH_SIZE EVAL_VAL_NUM_WORKERS DUMP_PATH LORA_VAL_METRIC_SCOPE
+export SOURCE_YAML VAL_TAG CONFIG_DIR ANTICIPATION_SEC EVAL_BATCH_SIZE EVAL_VAL_NUM_WORKERS DUMP_PATH
+export LORA_VAL_METRIC_SCOPE LORA_VAL_METRIC_AGGREGATION VAL_FIXED_HEAD_INDEX
 export MODEL_MODULE_NAME MODEL_MAX_ROLLOUT_STEPS BINARY_INPUT_ADAPTER_LOAD_CHECKPOINT
+export BINARY_INPUT_ADAPTER_FORCE_ZERO_MAP POSE_MAP_FORCE_ZERO VALDUMP_PREDICTION_DUMP
+export LORA_VAL_METRIC_AGGREGATION VAL_FIXED_HEAD_INDEX
 
 payload=$(cat <<'BASH'
 set -euo pipefail
@@ -94,6 +104,15 @@ if antic:
 
 lora = cfg["experiment"]["lora"]
 lora["val_metric_scope"] = os.environ.get("LORA_VAL_METRIC_SCOPE", "native")
+agg = os.environ.get("LORA_VAL_METRIC_AGGREGATION", "metric_wise_max")
+if agg == "action_top3_single_head":
+    agg = "single_head"
+lora["val_metric_aggregation"] = agg
+fixed_head = os.environ.get("VAL_FIXED_HEAD_INDEX", "").strip()
+if fixed_head:
+    lora["val_fixed_head_index"] = int(fixed_head)
+elif "val_fixed_head_index" in lora:
+    lora.pop("val_fixed_head_index", None)
 module_name = os.environ.get("MODEL_MODULE_NAME", "").strip()
 if module_name:
     cfg["model_kwargs"]["module_name"] = module_name
@@ -106,7 +125,8 @@ if max_rollout_steps:
     cfg["model_kwargs"].setdefault("wrapper_kwargs", {})["max_rollout_steps"] = int(max_rollout_steps)
 
 gaze = dict(lora.get("gaze", {}))
-if str(gaze.get("mode", "")).lower() == "binary_input_adapter":
+gaze_mode = str(gaze.get("mode", "")).lower()
+if gaze_mode.startswith("binary_input_adapter"):
     input_adapter = dict(gaze.get("input_adapter", {}))
     adapter_ckpt = os.environ.get("BINARY_INPUT_ADAPTER_LOAD_CHECKPOINT", "").strip()
     if not adapter_ckpt:
@@ -120,8 +140,14 @@ if str(gaze.get("mode", "")).lower() == "binary_input_adapter":
     gaze["input_adapter"] = input_adapter
     lora["gaze"] = gaze
 
+if os.environ.get("BINARY_INPUT_ADAPTER_FORCE_ZERO_MAP", "").strip().lower() in {"1", "true", "yes", "on"}:
+    gaze["force_zero_map"] = True
+if os.environ.get("POSE_MAP_FORCE_ZERO", "").strip().lower() in {"1", "true", "yes", "on"}:
+    gaze.setdefault("pose_map", {})["force_zero_pose"] = True
+lora["gaze"] = gaze
+
 pd_cfg = dict(lora.get("prediction_dump", {}))
-pd_cfg["enabled"] = True
+pd_cfg["enabled"] = os.environ.get("VALDUMP_PREDICTION_DUMP", "1").strip().lower() not in {"0", "false", "no", "off"}
 pd_cfg.setdefault("topk", 10)
 dump_path = os.environ.get("DUMP_PATH", "").strip()
 if dump_path:
@@ -143,10 +169,12 @@ print(
     f"[valdump] tag={cfg.get('tag')} dump_enabled=True "
     f"anticipation_time_sec={data['anticipation_time_sec']} "
     f"val_metric_scope={lora['val_metric_scope']} "
+    f"val_metric_aggregation={lora.get('val_metric_aggregation', 'metric_wise_max')} "
+    f"val_fixed_head_index={lora.get('val_fixed_head_index', '')} "
     f"model_module={cfg['model_kwargs']['module_name']}"
 )
-if str(gaze.get("mode", "")).lower() == "binary_input_adapter":
-    print(f"[valdump] binary_input_adapter_load_checkpoint={gaze['input_adapter']['load_checkpoint_path']}")
+if gaze_mode.startswith("binary_input_adapter"):
+    print(f"[valdump] gaze_mode={gaze_mode} binary_input_adapter_load_checkpoint={gaze['input_adapter']['load_checkpoint_path']}")
 PY
 
 config_path="${CONFIG_DIR}/${VAL_TAG}.yaml"

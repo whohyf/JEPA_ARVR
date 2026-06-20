@@ -1,7 +1,7 @@
 nodes: 1
 tasks_per_node: 1
 cpus_per_task: 12
-tag: hdepic-lora-pose-rnn-1s
+tag: hdepic-lora-pose-rnn-1s-w12-bs2-cache-avgds
 eval_name: app.hdepic_lora_action_anticipation
 folder: /path/to/VJEPA2-EXP/outputs/hdepic_lora_action_anticipation
 resume_checkpoint: false
@@ -22,7 +22,7 @@ experiment:
     frames_per_clip: 32
     frames_per_second: 8
     motion_shift: false
-    num_workers: 4
+    num_workers: 12
     pin_memory: true
     random_resize_scale:
     - 0.08
@@ -35,23 +35,24 @@ experiment:
     train_anticipation_time_sec:
     - 0.25
     - 1.75
+    val_num_workers: 4
     clip_balanced: true
   optimization:
     num_epochs: 1
-    batch_size: 1
+    batch_size: 2
     use_bfloat16: true
     use_focal_loss: true
     multihead_kwargs:
     - weight_decay: 0.0001
       final_weight_decay: 0.0001
-      lr: 0.002
-      start_lr: 0.002
+      lr: 0.001
+      start_lr: 0.001
       final_lr: 0.0
       warmup: 0.0
     - weight_decay: 0.0001
       final_weight_decay: 0.0001
-      lr: 0.002
-      start_lr: 0.002
+      lr: 0.001
+      start_lr: 0.001
       final_lr: 0.0
       warmup: 0.0
     - weight_decay: 0.0001
@@ -74,14 +75,14 @@ experiment:
       warmup: 0.0
     - weight_decay: 0.001
       final_weight_decay: 0.001
-      lr: 0.002
-      start_lr: 0.002
+      lr: 0.001
+      start_lr: 0.001
       final_lr: 0.0
       warmup: 0.0
     - weight_decay: 0.001
       final_weight_decay: 0.001
-      lr: 0.002
-      start_lr: 0.002
+      lr: 0.001
+      start_lr: 0.001
       final_lr: 0.0
       warmup: 0.0
     - weight_decay: 0.001
@@ -104,14 +105,14 @@ experiment:
       warmup: 0.0
     - weight_decay: 0.01
       final_weight_decay: 0.01
-      lr: 0.002
-      start_lr: 0.002
+      lr: 0.001
+      start_lr: 0.001
       final_lr: 0.0
       warmup: 0.0
     - weight_decay: 0.01
       final_weight_decay: 0.01
-      lr: 0.002
-      start_lr: 0.002
+      lr: 0.001
+      start_lr: 0.001
       final_lr: 0.0
       warmup: 0.0
     - weight_decay: 0.01
@@ -134,14 +135,14 @@ experiment:
       warmup: 0.0
     - weight_decay: 0.1
       final_weight_decay: 0.1
-      lr: 0.002
-      start_lr: 0.002
+      lr: 0.001
+      start_lr: 0.001
       final_lr: 0.0
       warmup: 0.0
     - weight_decay: 0.1
       final_weight_decay: 0.1
-      lr: 0.002
-      start_lr: 0.002
+      lr: 0.001
+      start_lr: 0.001
       final_lr: 0.0
       warmup: 0.0
     - weight_decay: 0.1
@@ -194,7 +195,7 @@ experiment:
         local_spatial_radius: 1
         residual_alpha_init: 0.01
         history_sec: 0.0
-        gaze_lr_mult: 5.0
+        gaze_lr_mult: 2.0
       hidden_dump:
         enabled: true
         max_batches: 4

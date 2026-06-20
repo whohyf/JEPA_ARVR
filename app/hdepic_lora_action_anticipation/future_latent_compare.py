@@ -11,8 +11,13 @@ import argparse
 import csv
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
+
+# Large HD-EPIC clips (e.g. P01_20240204-130448) need a high EOF retry budget when
+# decord seeks near the file tail. Must be set before importing decord.
+os.environ.setdefault("DECORD_EOF_RETRY_MAX", "65536")
 
 import numpy as np
 import torch
@@ -31,10 +36,64 @@ from app.hdepic_lora_action_anticipation.gaze_rnn import (
     call_classifier,
     encode_gaze_tokens,
 )
+from app.hdepic_lora_action_anticipation.rope_position_scaling import remap_mask_pair_ntk_temporal
 from evals.action_anticipation_frozen.dataloader import filter_annotations, make_transforms
 from src.utils.checkpoint_loader import robust_checkpoint_loader
 
 logger = logging.getLogger("future_latent_compare")
+
+_DEFAULT_DECORD_BLOCKLIST = (
+    Path(__file__).resolve().parents[2] / "data/hdepic_vjepa_annotations/decord_eof_videos.txt"
+)
+
+
+def load_decord_blocklist(path: Path | str | None = None) -> set[str]:
+    blocklist_path = Path(path or os.environ.get("HDEPIC_DECORD_BLOCKLIST", _DEFAULT_DECORD_BLOCKLIST))
+    if not blocklist_path.exists():
+        return set()
+    entries: set[str] = set()
+    for line in blocklist_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            entries.add(line)
+    return entries
+
+
+# Per-worker single VideoReader cache (clip-balanced style; one open reader per worker).
+_WORKER_READER_PATH: str | None = None
+_WORKER_READER_STATE: tuple[VideoReader, float, int] | None = None
+
+
+def decord_worker_init(_worker_id: int) -> None:
+    os.environ.setdefault("DECORD_EOF_RETRY_MAX", "65536")
+    _reset_worker_reader()
+
+
+def _reset_worker_reader() -> None:
+    global _WORKER_READER_PATH, _WORKER_READER_STATE
+    if _WORKER_READER_STATE is not None:
+        vr, _, _ = _WORKER_READER_STATE
+        del vr
+    _WORKER_READER_PATH = None
+    _WORKER_READER_STATE = None
+
+
+def _cached_video_reader(video_path: str, *, cache_reader: bool = True) -> tuple[VideoReader, float, int]:
+    global _WORKER_READER_PATH, _WORKER_READER_STATE
+    path = str(video_path)
+    if cache_reader and _WORKER_READER_PATH == path and _WORKER_READER_STATE is not None:
+        return _WORKER_READER_STATE
+    if _WORKER_READER_STATE is not None:
+        vr, _, _ = _WORKER_READER_STATE
+        del vr
+        _WORKER_READER_PATH = None
+        _WORKER_READER_STATE = None
+    vr = VideoReader(path, num_threads=1, ctx=cpu(0))
+    state = (vr, float(vr.get_avg_fps()), len(vr))
+    if cache_reader:
+        _WORKER_READER_PATH = path
+        _WORKER_READER_STATE = state
+    return state
 
 
 @dataclass
@@ -58,31 +117,68 @@ class FutureOracleDataset(Dataset):
         resolution: int,
         drop_incomplete_history: bool,
         max_samples: int | None = None,
+        training: bool = False,
+        auto_augment: bool = True,
+        reprob: float = 0.25,
+        random_resize_scale: tuple[float, float] = (0.08, 1.0),
+        decord_blocklist_path: Path | str | None = None,
+        probe_decodable: bool = False,
     ):
         self.samples = samples[:max_samples] if max_samples else samples
         self.horizon_sec = float(horizon_sec)
         self.frames_per_clip = int(frames_per_clip)
         self.fps = float(fps)
         self.anticipation_point = anticipation_point
-        self.transform = make_transforms(training=False, crop_size=resolution)
+        self.transform = make_transforms(
+            training=training,
+            crop_size=resolution,
+            auto_augment=auto_augment,
+            reprob=reprob,
+            random_resize_scale=random_resize_scale,
+        )
         self.drop_incomplete_history = bool(drop_incomplete_history)
+        blocklist = load_decord_blocklist(decord_blocklist_path)
+        if blocklist:
+            before = len(self.samples)
+            self.samples = [
+                s for s in self.samples if s.video_id not in blocklist and s.video_path not in blocklist
+            ]
+            logger.info(
+                "Decord blocklist removed %d/%d samples (entries=%d)",
+                before - len(self.samples),
+                before,
+                len(blocklist),
+            )
         if self.drop_incomplete_history:
             self.samples = self._filter_full_history(self.samples)
+        if probe_decodable:
+            self.samples = self._filter_decodable_videos(self.samples)
 
     def _filter_full_history(self, samples: list[FutureSample]) -> list[FutureSample]:
+        meta_cache: dict[str, tuple[float, int]] = {}
+        bad_videos: set[str] = set()
         kept = []
         for sample in samples:
-            try:
-                vr = VideoReader(sample.video_path, num_threads=1, ctx=cpu(0))
-                vfps = float(vr.get_avg_fps())
-            except Exception as exc:
-                logger.info("Skipping unreadable video during history filter: %s error=%r", sample.video_path, exc)
+            path = sample.video_path
+            if path in bad_videos:
                 continue
+            if path not in meta_cache:
+                try:
+                    meta_cache[path] = self._read_video_length(path)
+                except Exception as exc:
+                    logger.info(
+                        "Skipping unreadable video during history filter: %s error=%r",
+                        path,
+                        exc,
+                    )
+                    bad_videos.add(path)
+                    continue
+            vfps, n_total = meta_cache[path]
             frame_step = max(1, int(vfps / self.fps))
             nframes = int(self.frames_per_clip * frame_step)
             anchor = self._anchor_frame(sample)
             observed_end = anchor - int(self.horizon_sec * vfps)
-            if observed_end - nframes >= 0:
+            if observed_end - nframes >= 0 and anchor < n_total:
                 kept.append(sample)
         logger.info(
             "Horizon %.3fs full-history filter kept %d/%d samples",
@@ -92,6 +188,66 @@ class FutureOracleDataset(Dataset):
         )
         return kept
 
+    def _filter_decodable_videos(self, samples: list[FutureSample]) -> list[FutureSample]:
+        by_path: dict[str, list[FutureSample]] = {}
+        for sample in samples:
+            by_path.setdefault(sample.video_path, []).append(sample)
+        kept: list[FutureSample] = []
+        kept_videos = 0
+        for path, group in by_path.items():
+            probe = max(group, key=lambda s: s.stop_frame)
+            try:
+                self._probe_sample_decode(probe)
+            except Exception as exc:
+                logger.warning(
+                    "Excluding decord-failing video %s (%d samples): %r",
+                    path,
+                    len(group),
+                    exc,
+                )
+                continue
+            kept.extend(group)
+            kept_videos += 1
+        logger.info(
+            "Decodable probe kept %d/%d samples across %d/%d videos",
+            len(kept),
+            len(samples),
+            kept_videos,
+            len(by_path),
+        )
+        return kept
+
+    @staticmethod
+    def _read_video_length(video_path: str) -> tuple[float, int]:
+        vr = VideoReader(video_path, num_threads=1, ctx=cpu(0))
+        vfps = float(vr.get_avg_fps())
+        n_total = len(vr)
+        del vr
+        return vfps, n_total
+
+    def _clip_indices(self, vfps: float, end_frame: int, n_total: int) -> np.ndarray:
+        frame_step = max(1, int(vfps / self.fps))
+        nframes = int(self.frames_per_clip * frame_step)
+        indices = np.arange(end_frame - nframes, end_frame, frame_step).astype(np.int64)
+        indices[indices < 0] = 0
+        if n_total > 0:
+            safe_max = max(0, n_total - 1)
+            indices[indices >= n_total] = safe_max
+        return indices
+
+    def _decode_clip(self, vr: VideoReader, vfps: float, end_frame: int, n_total: int):
+        indices = self._clip_indices(vfps, end_frame, n_total)
+        clip = self.transform(vr.get_batch(indices).asnumpy())
+        return clip, indices
+
+    def _probe_sample_decode(self, sample: FutureSample) -> None:
+        vr, vfps, n_total = _cached_video_reader(sample.video_path)
+        anchor = self._anchor_frame(sample)
+        observed_end = anchor - int(self.horizon_sec * vfps)
+        for end_frame in (observed_end, anchor):
+            indices = self._clip_indices(vfps, end_frame, n_total)
+            vr.get_batch(indices).asnumpy()
+
     def _anchor_frame(self, sample: FutureSample) -> int:
         # Validation configs normally use [0, 0], i.e. action stop frame.
         ap = float(sum(self.anticipation_point) / 2.0)
@@ -100,29 +256,14 @@ class FutureOracleDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
-    def _decode_clip(self, vr: VideoReader, vfps: float, end_frame: int):
-        frame_step = max(1, int(vfps / self.fps))
-        nframes = int(self.frames_per_clip * frame_step)
-        indices = np.arange(end_frame - nframes, end_frame, frame_step).astype(np.int64)
-        indices[indices < 0] = 0
-        n_total = len(vr)
-        if n_total > 0:
-            indices[indices >= n_total] = n_total - 1
-        clip = self.transform(vr.get_batch(indices).asnumpy())
-        return clip, indices
-
-    def __getitem__(self, idx: int):
-        sample = self.samples[idx]
-        vr = VideoReader(sample.video_path, num_threads=1, ctx=cpu(0))
-        vr.seek(0)
-        vfps = float(vr.get_avg_fps())
-        frame_shape = vr.next().shape  # (H, W, C); next() avoids decoding all metadata
-        h0, w0 = int(frame_shape[0]), int(frame_shape[1])
-        vr.seek(0)
+    def _getitem_one(self, sample: FutureSample):
+        vr, vfps, n_total = _cached_video_reader(sample.video_path)
+        first = vr.get_batch([0]).asnumpy()
+        h0, w0 = int(first.shape[1]), int(first.shape[2])
         anchor = self._anchor_frame(sample)
         observed_end = anchor - int(self.horizon_sec * vfps)
-        obs, obs_indices = self._decode_clip(vr, vfps, observed_end)
-        oracle, oracle_indices = self._decode_clip(vr, vfps, anchor)
+        obs, obs_indices = self._decode_clip(vr, vfps, observed_end, n_total)
+        oracle, oracle_indices = self._decode_clip(vr, vfps, anchor, n_total)
         return {
             "observed": obs,
             "oracle": oracle,
@@ -143,6 +284,24 @@ class FutureOracleDataset(Dataset):
                 "width": w0,
             },
         }
+
+    def __getitem__(self, idx: int):
+        n = len(self.samples)
+        last_exc = None
+        for attempt in range(12):
+            j = (idx + attempt * 17) % n
+            sample = self.samples[j]
+            try:
+                return self._getitem_one(sample)
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "FutureOracleDataset skip video=%s attempt=%d: %r",
+                    sample.video_path,
+                    attempt,
+                    exc,
+                )
+        raise RuntimeError(f"Failed to load sample after retries: {last_exc}") from last_exc
 
 
 def _build_samples(val_annotations) -> list[FutureSample]:
@@ -252,7 +411,29 @@ def _last_layer(tokens: torch.Tensor, embed_dim: int) -> torch.Tensor:
     return tokens[:, :, -embed_dim:] if tokens.size(-1) > embed_dim else tokens
 
 
-def _predict_direct(encoder, predictor, observed_tokens, horizon_sec, cfg, device, dense: bool = False):
+def _predictor_trained_grid_depth(predictor, encoder) -> int:
+    grid_depth = getattr(predictor, "grid_depth", None)
+    if grid_depth is not None:
+        return int(grid_depth)
+    num_patches = int(getattr(predictor, "num_patches", 0))
+    spatial = (encoder.grid_height * encoder.grid_width) if hasattr(encoder, "grid_height") else None
+    if num_patches > 0 and spatial:
+        return max(int(num_patches // spatial), 1)
+    pretrain_frames = int(getattr(predictor, "num_frames", encoder.num_frames))
+    tubelet = int(encoder.tubelet_size)
+    return max(pretrain_frames // tubelet, 1)
+
+
+def _predict_direct(
+    encoder,
+    predictor,
+    observed_tokens,
+    horizon_sec,
+    cfg,
+    device,
+    dense: bool = False,
+    rope_scale_mode: str | None = None,
+):
     data_cfg = cfg["experiment"]["data"]
     wrapper_cfg = cfg["model_kwargs"].get("wrapper_kwargs", {})
     downsample_factor = float(data_cfg.get("video_downsample_factor", 1.0) or 1.0)
@@ -267,7 +448,8 @@ def _predict_direct(encoder, predictor, observed_tokens, horizon_sec, cfg, devic
     mask_start = N if dense else start
     mask_tokens = (start - N) + n_pred if dense else n_pred
     max_position = int(getattr(predictor, "num_patches", start + n_pred))
-    if start + n_pred > max_position:
+    use_rope_scale = str(rope_scale_mode or "").lower() == "ntk_temporal"
+    if start + n_pred > max_position and not use_rope_scale:
         return None, {
             "status": "unsupported_position",
             "target_start": start,
@@ -278,12 +460,30 @@ def _predict_direct(encoder, predictor, observed_tokens, horizon_sec, cfg, devic
         return None, {"status": "empty_mask", "target_start": start, "mask_tokens": mask_tokens}
     masks_x = torch.arange(N, device=device).unsqueeze(0).repeat(B, 1)
     masks_y = torch.arange(mask_tokens, device=device).unsqueeze(0).repeat(B, 1) + mask_start
+    rope_scale = 1.0
+    if use_rope_scale:
+        trained_grid_depth = _predictor_trained_grid_depth(predictor, encoder)
+        masks_x, masks_y, rope_scale = remap_mask_pair_ntk_temporal(
+            masks_x, masks_y, spatial, trained_grid_depth
+        )
+        remapped_max = int(torch.cat([masks_x.reshape(-1), masks_y.reshape(-1)]).max().item())
+        if remapped_max >= max_position:
+            return None, {
+                "status": "unsupported_position_after_remap",
+                "target_start": start,
+                "remapped_max": remapped_max,
+                "max_position": max_position - 1,
+                "rope_scale": rope_scale,
+            }
     pred = predictor(observed_tokens, masks_x=masks_x, masks_y=masks_y)
     pred = pred[0] if isinstance(pred, tuple) else pred
     return _last_layer(pred[:, -n_pred:, :], encoder.embed_dim), {
         "status": "ok",
         "mask_tokens": mask_tokens,
         "target_start": start,
+        "rope_scale_mode": rope_scale_mode or "",
+        "rope_scale": rope_scale,
+        "dense": dense,
     }
 
 
@@ -411,7 +611,10 @@ def _latent_stats(pred: torch.Tensor, oracle: torch.Tensor):
     oracle_f = oracle.float()
     mse = torch.mean((pred_f - oracle_f) ** 2).item()
     cos = torch.nn.functional.cosine_similarity(pred_f.flatten(1), oracle_f.flatten(1), dim=1).mean().item()
-    return mse, cos
+    pred_norm = torch.linalg.vector_norm(pred_f.flatten(1), dim=1).mean().item()
+    oracle_norm = torch.linalg.vector_norm(oracle_f.flatten(1), dim=1).mean().item()
+    norm_ratio = pred_norm / max(oracle_norm, 1e-8)
+    return mse, cos, norm_ratio
 
 
 def _collate(batch):
@@ -476,6 +679,43 @@ def _build_gaze_components(cfg, classifiers, device):
         out["map_builder"] = map_builder
         return out
 
+    if mode == "binary_input_adapter_gaze_pose_matrix":
+        from app.hdepic_lora_action_anticipation.pose_map_builder import GazePoseInputMapBuilder
+
+        ad_cfg = dict(gaze_cfg.get("input_adapter", {}))
+        in_channels = int(ad_cfg.get("in_channels", 5))
+        adapter = BinaryMapInputAdapter(
+            hidden_dim=int(ad_cfg.get("hidden_dim", 8)),
+            scale=float(ad_cfg.get("scale", 1.0)),
+            temporal_kernel=int(ad_cfg.get("temporal_kernel", 3)),
+            binary_center=float(ad_cfg.get("binary_center", 0.0)),
+            residual_clamp=float(ad_cfg.get("residual_clamp", 1.0)),
+            in_channels=in_channels,
+        ).to(device).eval()
+        for p in adapter.parameters():
+            p.requires_grad = False
+        ckpt_path = Path(cfg["folder"]) / "action_anticipation_frozen" / cfg["tag"] / "binary_input_adapter_latest.pt"
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"binary_input_adapter checkpoint not found: {ckpt_path}")
+        ckpt = robust_checkpoint_loader(str(ckpt_path), map_location=torch.device("cpu"))
+        state = ckpt.get("input_adapter", ckpt)
+        if any(str(k).startswith("module.input_adapter.") for k in state):
+            state = {str(k).removeprefix("module.input_adapter."): v for k, v in state.items() if str(k).startswith("module.input_adapter.")}
+        elif any(str(k).startswith("input_adapter.") for k in state):
+            state = {str(k).removeprefix("input_adapter."): v for k, v in state.items() if str(k).startswith("input_adapter.")}
+        missing, unexpected = adapter.load_state_dict(state, strict=False)
+        logger.info(
+            "Loaded binary_input_adapter_gaze_pose_matrix from %s missing=%d unexpected=%d",
+            ckpt_path,
+            len(missing),
+            len(unexpected),
+        )
+        gate = GazeTokenGate({**gaze_cfg, "mode": "token_gate"})
+        map_builder = GazePoseInputMapBuilder(gaze_cfg, gate=gate)
+        out["adapter"] = adapter
+        out["map_builder"] = map_builder
+        return out
+
     if mode in {"rnn_fuse", "mlp_fuse"}:
         gate = GazeTokenGate({**gaze_cfg, "mode": mode})
         traj_loader = GazeTrajectoryLoader(gaze_cfg, gate=gate)
@@ -513,8 +753,10 @@ def run_horizon(args, cfg, annotations, samples, encoder, predictor, classifiers
     logger.info("Metric scope: %s head_selection: %s", metric_scope, head_selection)
 
     methods = ["encoder", "direct_single", "direct_dense", "ar", "oracle"]
+    if getattr(args, "include_rope_scale", False):
+        methods.extend(["direct_single_rope", "direct_dense_rope"])
     metrics = {m: [_metric_pack(annotations, device) for _ in classifiers] for m in methods}
-    latent_rows = {m: [] for m in ["direct_single", "direct_dense", "ar"]}
+    latent_rows = {m: [] for m in methods if m not in {"encoder", "oracle"}}
     status_counts: dict[str, int] = {}
     sample_count = 0
     use_bfloat16 = bool(cfg["experiment"]["optimization"].get("use_bfloat16", False)) and device.type == "cuda"
@@ -561,8 +803,8 @@ def run_horizon(args, cfg, annotations, samples, encoder, predictor, classifiers
             )
             if direct_target is not None:
                 target_by_method["direct_single"] = direct_target
-                mse, cos = _latent_stats(direct_target, oracle_target)
-                latent_rows["direct_single"].append((mse, cos, observed.size(0)))
+                mse, cos, norm_ratio = _latent_stats(direct_target, oracle_target)
+                latent_rows["direct_single"].append((mse, cos, norm_ratio, observed.size(0)))
             dense_target, dense_info = _predict_direct(
                 encoder, predictor, observed_tokens, horizon, cfg, device, dense=True
             )
@@ -571,14 +813,49 @@ def run_horizon(args, cfg, annotations, samples, encoder, predictor, classifiers
             )
             if dense_target is not None:
                 target_by_method["direct_dense"] = dense_target
-                mse, cos = _latent_stats(dense_target, oracle_target)
-                latent_rows["direct_dense"].append((mse, cos, observed.size(0)))
+                mse, cos, norm_ratio = _latent_stats(dense_target, oracle_target)
+                latent_rows["direct_dense"].append((mse, cos, norm_ratio, observed.size(0)))
+            if getattr(args, "include_rope_scale", False):
+                rope_target, rope_info = _predict_direct(
+                    encoder,
+                    predictor,
+                    observed_tokens,
+                    horizon,
+                    cfg,
+                    device,
+                    dense=False,
+                    rope_scale_mode="ntk_temporal",
+                )
+                status_counts[f"direct_single_rope:{rope_info['status']}"] = (
+                    status_counts.get(f"direct_single_rope:{rope_info['status']}", 0) + observed.size(0)
+                )
+                if rope_target is not None:
+                    target_by_method["direct_single_rope"] = rope_target
+                    mse, cos, norm_ratio = _latent_stats(rope_target, oracle_target)
+                    latent_rows["direct_single_rope"].append((mse, cos, norm_ratio, observed.size(0)))
+                rope_dense_target, rope_dense_info = _predict_direct(
+                    encoder,
+                    predictor,
+                    observed_tokens,
+                    horizon,
+                    cfg,
+                    device,
+                    dense=True,
+                    rope_scale_mode="ntk_temporal",
+                )
+                status_counts[f"direct_dense_rope:{rope_dense_info['status']}"] = (
+                    status_counts.get(f"direct_dense_rope:{rope_dense_info['status']}", 0) + observed.size(0)
+                )
+                if rope_dense_target is not None:
+                    target_by_method["direct_dense_rope"] = rope_dense_target
+                    mse, cos, norm_ratio = _latent_stats(rope_dense_target, oracle_target)
+                    latent_rows["direct_dense_rope"].append((mse, cos, norm_ratio, observed.size(0)))
             ar_target, ar_info = _predict_ar(encoder, predictor, observed_tokens, horizon, cfg, device)
             status_counts[f"ar:{ar_info['status']}"] = status_counts.get(f"ar:{ar_info['status']}", 0) + observed.size(0)
             if ar_target is not None:
                 target_by_method["ar"] = ar_target
-                mse, cos = _latent_stats(ar_target, oracle_target)
-                latent_rows["ar"].append((mse, cos, observed.size(0)))
+                mse, cos, norm_ratio = _latent_stats(ar_target, oracle_target)
+                latent_rows["ar"].append((mse, cos, norm_ratio, observed.size(0)))
 
             for method, target in target_by_method.items():
                 tokens_by_method[method] = torch.cat([observed_last, target], dim=1)
@@ -605,10 +882,12 @@ def run_horizon(args, cfg, annotations, samples, encoder, predictor, classifiers
         action_top3_head, report_metrics, selected_heads = _select_head_metrics(metrics[method], head_selection)
         latent_mse = ""
         latent_cos = ""
+        latent_norm_ratio = ""
         if method in latent_rows and latent_rows[method]:
-            denom = sum(n for _, _, n in latent_rows[method])
-            latent_mse = sum(mse * n for mse, _, n in latent_rows[method]) / max(1, denom)
-            latent_cos = sum(cos * n for _, cos, n in latent_rows[method]) / max(1, denom)
+            denom = sum(n for _, _, _, n in latent_rows[method])
+            latent_mse = sum(mse * n for mse, _, _, n in latent_rows[method]) / max(1, denom)
+            latent_cos = sum(cos * n for _, cos, _, n in latent_rows[method]) / max(1, denom)
+            latent_norm_ratio = sum(nr * n for _, _, nr, n in latent_rows[method]) / max(1, denom)
         status = "ok"
         if method not in {"encoder", "oracle"}:
             ok = status_counts.get(f"{method}:ok", 0)
@@ -624,6 +903,7 @@ def run_horizon(args, cfg, annotations, samples, encoder, predictor, classifiers
             "best_classifier": action_top3_head,
             "latent_mse_to_oracle": latent_mse,
             "latent_cos_to_oracle": latent_cos,
+            "latent_norm_ratio_to_oracle": latent_norm_ratio,
             **report_metrics,
             **selected_heads,
             "selected_heads_json": json.dumps(selected_heads, sort_keys=True),
@@ -645,6 +925,11 @@ def parse_args():
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--metric-scope", choices=["native", "filtered"], default="native")
     parser.add_argument("--head-selection", choices=["vjepa2", "action_top3"], default="vjepa2")
+    parser.add_argument(
+        "--include-rope-scale",
+        action="store_true",
+        help="Also evaluate direct_single_rope / direct_dense_rope with NTK temporal scaling.",
+    )
     return parser.parse_args()
 
 

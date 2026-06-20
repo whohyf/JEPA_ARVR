@@ -36,6 +36,7 @@ def parse_args():
         default=None,
         help="Optional video_ids for sanity plots (default: 3 reference videos if matplotlib available)",
     )
+    parser.add_argument("--interframe-k-max", type=int, default=128)
     parser.add_argument("--skip-clip-audit", action="store_true")
     return parser.parse_args()
 
@@ -130,6 +131,65 @@ def audit_sessions(slam_root: Path, mapping: dict) -> dict:
     return per_session
 
 
+def audit_interframe_interval_counts(
+    loader: SlamPoseLoader,
+    rows: pd.DataFrame,
+    sample_n: int,
+    seed: int,
+    k_max: int = 128,
+) -> dict:
+    """Audit per inter-frame interval SLAM sample counts for matrix packing."""
+    rng = random.Random(seed)
+    indices = list(range(len(rows)))
+    rng.shuffle(indices)
+    indices = indices[: min(sample_n, len(indices))]
+
+    interval_counts: list[int] = []
+    clips_ok = 0
+    clips_with_pose = 0
+    truncated_intervals = 0
+    empty_intervals = 0
+
+    for idx in indices:
+        row = rows.iloc[idx]
+        meta = _simulate_clip_window(row)
+        frame_ts = loader.frame_timestamps_us(meta)
+        record = loader._load_clip_record(meta)  # noqa: SLF001
+        if frame_ts is None or record is None:
+            continue
+        clips_with_pose += 1
+        ts = record.timestamps_us
+        valid_clip = True
+        for i in range(len(frame_ts) - 1):
+            t0, t1 = float(frame_ts[i]), float(frame_ts[i + 1])
+            count = int(np.sum((ts >= t0) & (ts < t1)))
+            interval_counts.append(count)
+            if count == 0:
+                empty_intervals += 1
+            if count > k_max:
+                truncated_intervals += 1
+        mats = loader.query_interframe_matrices(meta, k_max)
+        if mats is not None:
+            clips_ok += 1
+
+    counts_arr = np.asarray(interval_counts, dtype=np.int64)
+    n_intervals = int(counts_arr.size)
+    return {
+        "sample_count": len(indices),
+        "clips_with_pose_window": clips_with_pose,
+        "clips_query_ok": clips_ok,
+        "k_max": int(k_max),
+        "interval_count_total": n_intervals,
+        "interval_count_median": float(np.median(counts_arr)) if n_intervals else None,
+        "interval_count_p95": float(np.percentile(counts_arr, 95)) if n_intervals else None,
+        "interval_count_p99": float(np.percentile(counts_arr, 99)) if n_intervals else None,
+        "interval_count_min": int(counts_arr.min()) if n_intervals else None,
+        "interval_count_max": int(counts_arr.max()) if n_intervals else None,
+        "empty_interval_frac": empty_intervals / max(1, n_intervals),
+        "truncated_interval_frac": truncated_intervals / max(1, n_intervals),
+    }
+
+
 def audit_clip_alignment(
     loader: SlamPoseLoader,
     gate: GazeTokenGate,
@@ -201,6 +261,7 @@ def write_markdown(path: Path, payload: dict):
     m = payload["mapping"]
     sessions = payload["session_stats"]
     clip = payload.get("clip_audit", {})
+    interframe = payload.get("interframe_audit", {})
     train = payload.get("train_videos", {})
     val = payload.get("val_videos", {})
 
@@ -247,6 +308,25 @@ def write_markdown(path: Path, payload: dict):
                 f"- gaze query_ok: {split_clip.get('gaze_query_ok')} ({split_clip.get('gaze_query_ok_frac', 0):.3f})",
                 f"- pose points median/min/max: {split_clip.get('pose_points_median')} / {split_clip.get('pose_points_min')} / {split_clip.get('pose_points_max')}",
                 f"- max in-window timestamp gap (median us): {split_clip.get('max_in_window_gap_us_median')}",
+            ]
+
+    if interframe:
+        for split_name, split_if in interframe.items():
+            if not isinstance(split_if, dict):
+                continue
+            lines += [
+                "",
+                f"## Inter-frame Pose Interval Audit ({split_name}, k_max={split_if.get('k_max')})",
+                "",
+                f"- sample_count: {split_if.get('sample_count')}",
+                f"- clips_with_pose_window: {split_if.get('clips_with_pose_window')}",
+                f"- clips_query_ok: {split_if.get('clips_query_ok')}",
+                f"- interval_count median/p95/p99/min/max: "
+                f"{split_if.get('interval_count_median')} / {split_if.get('interval_count_p95')} / "
+                f"{split_if.get('interval_count_p99')} / {split_if.get('interval_count_min')} / "
+                f"{split_if.get('interval_count_max')}",
+                f"- empty_interval_frac: {split_if.get('empty_interval_frac')}",
+                f"- truncated_interval_frac (count > k_max): {split_if.get('truncated_interval_frac')}",
             ]
 
     lines += [
@@ -380,13 +460,20 @@ def main():
     val_cov = _split_video_coverage(mapping, val_csv)
 
     clip_audit = {}
+    interframe_audit = {}
     if not args.skip_clip_audit and train_csv.exists():
         train_rows = _load_csv_rows(train_csv)
         clip_audit["train"] = audit_clip_alignment(loader, gate, train_rows, args.sample_rows, args.seed)
+        interframe_audit["train"] = audit_interframe_interval_counts(
+            loader, train_rows, args.sample_rows, args.seed, k_max=args.interframe_k_max
+        )
         if val_csv.exists():
             val_rows = _load_csv_rows(val_csv)
             clip_audit["val"] = audit_clip_alignment(
                 loader, gate, val_rows, min(args.sample_rows, len(val_rows)), args.seed + 1
+            )
+            interframe_audit["val"] = audit_interframe_interval_counts(
+                loader, val_rows, min(args.sample_rows, len(val_rows)), args.seed + 1, k_max=args.interframe_k_max
             )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -399,6 +486,7 @@ def main():
         "train_videos": train_cov,
         "val_videos": val_cov,
         "clip_audit": clip_audit,
+        "interframe_audit": interframe_audit,
     }
     (args.output_dir / "slam_pose_inspection.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     write_markdown(args.output_dir / "slam_pose_inspection.md", payload)
@@ -419,6 +507,12 @@ def main():
         t = clip_audit["train"]
         print(f"train_pose_query_ok_frac: {t.get('pose_query_ok_frac')}")
         print(f"train_gaze_query_ok_frac: {t.get('gaze_query_ok_frac')}")
+    if interframe_audit.get("train"):
+        t = interframe_audit["train"]
+        print(
+            "train_interframe_interval_median/p99/trunc_frac: "
+            f"{t.get('interval_count_median')}/{t.get('interval_count_p99')}/{t.get('truncated_interval_frac')}"
+        )
     print(f"wrote: {args.output_dir / 'slam_pose_inspection.md'}")
 
 

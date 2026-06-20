@@ -1,21 +1,50 @@
 # 方法、脚本与代码对应表
 
-更新日期：2026-06-01
+更新日期：2026-06-20
 
 这份文档用于帮助合作者快速了解我们做了哪些方法，以及每个方法对应哪些运行脚本、配置文件和核心代码。文档只保留复现和读代码所需的信息。
 
+> **实验历史与指标**请到 VJEPA2-EXP 仓库查看 `logs/DASHBOARD.md` 和各分支卡。
+> **中文超参表**见 [docs/human_readable_zh/超参表(zh).md](human_readable_zh/超参表(zh).md)。
+> **近期 HPC Run 入口**见 [docs/RECENT_RUNS.md](RECENT_RUNS.md)。
+
+---
+
+## 当前标准（2026-06-15 起）
+
+| 项 | 值 |
+|---|---|
+| Backbone | ViT-L/256（已从 ViT-G/384 迁回） |
+| 数据划分 | `p01_fixed`（train 5964 / val 375 / test 1045） |
+| 类别空间 | `phd_reference`（全 HD-EPIC taxonomy + P01 primary verb-noun pairs） |
+| 时序采样 | `phd_reference`（action-start anchor，anticipation_point=[1,1]） |
+| Label 来源 | `primary_verb_noun`（verb_classes[0] / noun_classes[0]） |
+| Probe | singleprobe（已从 20-head sweep 迁移） |
+| 精度 | fp32（bf16 路径存在但需 GradScaler 修复） |
+| 指标 | Action Top-1/3/5 + class-mean Recall@5；verb/noun Top-3 |
+
+**旧版 B1–B10（ViT-G/384、20-head、legacy split）已归档。** 不要用归档分支的指标作为当前 baseline。
+
+---
+
 ## 总览
 
-| 方法 | 主要目的 | 运行入口 | 核心代码 |
-|---|---|---|---|
-| B1 Clean / LoRA baseline | 建立 HD-EPIC action anticipation 干净基线 | `scripts/run_hdepic_action_anticipation.slurm`, `scripts/run_hdepic_lora_probe.slurm` | `app/hdepic_lora_action_anticipation/eval.py`, `vjepa2/evals/action_anticipation_frozen/*` |
-| B2 Gaze fusion | 将 gaze 作为附加模态接入 probe | `scripts/run_hdepic_lora_rnn_gaze_train.slurm`, `scripts/run_hdepic_lora_mlp_gaze_train.slurm`, `scripts/run_hdepic_lora_token_gaze_train.slurm`, `scripts/run_hdepic_lora_overlay_gaze_train.slurm` | `app/hdepic_lora_action_anticipation/gaze.py`, `app/hdepic_lora_action_anticipation/gaze_rnn.py`, `app/hdepic_lora_action_anticipation/eval.py` |
-| B3 Long horizon | 做 10s / 更长 horizon 的 anticipation 和 past-window 训练 | `scripts/run_hdepic_lora_val_horizons.slurm`, `scripts/run_hdepic_lora_past_window_train.slurm`, `scripts/run_hdepic_lora_past_window_baseline.slurm` | `app/hdepic_lora_action_anticipation/modelcustom/vit_encoder_predictor_rollout.py`, `app/hdepic_lora_action_anticipation/eval.py` |
-| B5 Binary input adapter | 用 gaze binary/distance map 在输入侧调制 RGB | `scripts/run_hdepic_lora_binary_input_adapter_train.slurm`, `scripts/run_hdepic_lora_binary_input_adapter_distance_lr.slurm`, `scripts/run_hdepic_lora_binary_input_adapter_zero_val.slurm` | `app/hdepic_lora_action_anticipation/binary_input_adapter.py`, `app/hdepic_lora_action_anticipation/binary_map_utils.py`, `app/hdepic_lora_action_anticipation/binary_map_aug.py` |
-| B6 Future latent compare | 分析 observed / predicted / oracle latent 的差异和失败模式 | `scripts/run_hdepic_future_latent_compare.slurm`, `scripts/run_hdepic_future_latent_failure_modes.slurm`, `scripts/run_hdepic_lora_valonly_dump.slurm`, `scripts/run_hdepic_rescore_window_cpu.slurm` | `app/hdepic_lora_action_anticipation/future_latent_compare.py`, `scripts/analyze_future_latent_failure_modes.py`, `scripts/rescore_window.py` |
-| B7 Long-history gaze | 固定视频窗口，只延长 gaze history | `scripts/run_hdepic_lora_rnn_long_gaze_train.slurm` | `app/hdepic_lora_action_anticipation/gaze_rnn.py`, `app/hdepic_lora_action_anticipation/gaze.py`, `app/hdepic_lora_action_anticipation/eval.py` |
-| B8 Encoder-output gaze injection | 在 encoder output / predictor input 之间注入 gaze | `scripts/run_hdepic_lora_encoder_gaze_inject_train.slurm` | `app/hdepic_lora_action_anticipation/encoder_output_gaze_adapter.py`, `app/hdepic_lora_action_anticipation/gaze_rnn.py` |
-| B10 SLAM pose / multimodal RNN | 用 SLAM pose 或 pose+gaze token 做 late fusion | `scripts/run_hdepic_lora_rnn_pose_train.slurm`, `scripts/run_hdepic_lora_rnn_multimodal_train.slurm`, `scripts/run_hdepic_lora_pose_smoke.slurm` | `app/hdepic_lora_action_anticipation/pose_slam.py`, `app/hdepic_lora_action_anticipation/gaze_rnn.py`, `app/hdepic_lora_action_anticipation/eval.py` |
+| 方法 | 主要目的 | 运行入口 | 核心代码 | 状态 |
+|---|---|---|---|---|
+| B1 Clean / LoRA baseline | HD-EPIC action anticipation 干净基线 | `scripts/run_hdepic_action_anticipation.slurm`, `scripts/run_hdepic_lora_probe.slurm` | `app/hdepic_lora_action_anticipation/eval.py`, `vjepa2/evals/action_anticipation_frozen/*` | **归档** |
+| B2 Gaze fusion | gaze 作为附加模态接入 probe | `scripts/run_hdepic_lora_rnn_gaze_train.slurm` 等 | `app/hdepic_lora_action_anticipation/gaze.py`, `gaze_rnn.py` | **归档** |
+| B3 Long horizon | 10s / 更长 horizon 的 anticipation | `scripts/run_hdepic_lora_val_horizons.slurm` 等 | `modelcustom/vit_encoder_predictor_rollout.py` | **归档** |
+| B5 Binary input adapter | gaze binary/distance map 调制 RGB 输入 | `scripts/run_hdepic_lora_binary_input_adapter_train.slurm` | `binary_input_adapter.py`, `binary_map_utils.py` | **归档** |
+| B6 Future latent compare | observed/predicted/oracle latent 差异分析 | `scripts/run_hdepic_future_latent_compare.slurm` | `future_latent_compare.py` | **归档** |
+| B7 Long-history gaze | 固定视频窗口，延长 gaze history | `scripts/run_hdepic_lora_rnn_long_gaze_train.slurm` | `gaze_rnn.py`, `gaze.py` | **归档** |
+| B8 Encoder-output gaze injection | encoder output / predictor input 间注入 gaze | `scripts/run_hdepic_lora_encoder_gaze_inject_train.slurm` | `encoder_output_gaze_adapter.py` | **归档** |
+| B10 SLAM pose / multimodal RNN | SLAM pose 或 pose+gaze token late fusion | `scripts/run_hdepic_lora_rnn_pose_train.slurm` | `pose_slam.py`, `gaze_rnn.py` | **归档** |
+| **B11 Encoder-LoRA + Interframe Pose Matrix** | ViT-L/256 singleprobe + encoder-LoRA + gaze/pose adapter | `scripts/run_hdepic_lora_binary_gaze_pose_matrix_train.slurm`, `scripts/run_hdepic_singleprobe_1s_*.slurm` | `binary_input_adapter.py`, `pose_slam.py`, `pose_map_builder.py`, `encoder_lora.py` | **Active** |
+| **Encoder-LoRA** | 在 frozen ViT encoder 注入 LoRA（rank=8, attn.qkv+attn.proj） | `scripts/run_hdepic_lora_probe.slurm`（通过 `ENCODER_LORA_ENABLED=1`） | `encoder_lora.py`, `eval.py::LoRALinear` | **Active** |
+| **Predictor-LoRA** | 在 frozen predictor 注入 LoRA（与 encoder-LoRA 同参） | `scripts/run_hdepic_lora_probe.slurm`（通过 `PREDICTOR_LORA_ENABLED=1`） | `predictor_lora.py` | **Active** |
+| **LTM (Latent Memory)** | latent memory / oracle compare / direct probe 诊断 | `scripts/run_d3_e18a_direct_probe_train.slurm`, `scripts/run_d3_e20_oracle_probe_train.slurm` | `app/hdepic_lora_action_anticipation/` LTM 分支代码 | **Active** |
+
+---
 
 ## 公共训练入口
 
@@ -23,324 +52,226 @@
 
 - `scripts/run_hdepic_lora_probe.slurm`
   - 生成或改写 eval config。
-  - 设置 batch size、worker 数、LR cap、checkpoint、tag、gaze mode 等公共训练参数。
+  - 设置 batch size、worker 数、LR、checkpoint、tag、gaze mode、encoder-LoRA、predictor-LoRA 等公共训练参数。
   - 多数专用脚本只是先设置环境变量，再调用这个共享入口。
 - `app/hdepic_lora_action_anticipation/eval.py`
   - HD-EPIC action anticipation eval / train 的主要扩展入口。
-  - 将不同 `gaze.mode`、past-window、adapter、pose 等配置接入模型和 dataloader。
+  - 将不同 `gaze.mode`、past-window、adapter、pose、encoder-LoRA、predictor-LoRA 等配置接入模型和 dataloader。
 - `app/hdepic_lora_action_anticipation/gaze.py`
   - gaze 数据读取、对齐、map/token 构造、coverage 诊断和 dataloader 逻辑。
 - `app/hdepic_lora_action_anticipation/gaze_rnn.py`
   - RNN / MLP / pose / multimodal token encoder，以及 probe-side fusion 模块。
 
-## B1: Clean / LoRA Baseline
+---
 
-用途：建立 HD-EPIC action anticipation 的 clean baseline，后续 gaze、binary adapter、long-horizon 都需要和它对齐 metric scope 后再比较。
+## 归档：B1–B10（Pre-ViT-L，2026-06-15 前）
+
+以下方法在 ViT-G/384、20-head、legacy split 下完成。代码仍在本仓库，但指标不应作为当前 baseline。完整历史见 VJEPA2-EXP `logs/archive/pre-vitl/ARCHIVE_INDEX.md`。
+
+### B1: Clean / LoRA Baseline
+
+用途：建立 HD-EPIC action anticipation 的 clean baseline。
 
 运行脚本：
-
-- `scripts/run_hdepic_action_anticipation.slurm`: 原始 action anticipation 准备/训练入口。
-- `scripts/run_hdepic_lora_probe.slurm`: 当前更常用的 LoRA probe 统一入口。
-- `scripts/run_hdepic_ek100_probe_valonly_horizons.slurm`: EK100 probe / val-only horizon 相关入口。
-
-常用配置：
-
-- `configs/generated/hdepic_action_anticipation_vitl384.yaml`
-- `configs/generated/hdepic_lora_probe_vitg384.yaml`
-- `configs/generated/hdepic_ek100_probe_valonly_1s.yaml`
-- `configs/generated/hdepic_ek100_probe_valonly_10s.yaml`
+- `scripts/run_hdepic_action_anticipation.slurm`
+- `scripts/run_hdepic_lora_probe.slurm`
 
 核心代码：
-
 - `app/hdepic_lora_action_anticipation/eval.py`
 - `vjepa2/evals/action_anticipation_frozen/eval.py`
 - `vjepa2/evals/action_anticipation_frozen/dataloader.py`
 - `vjepa2/evals/action_anticipation_frozen/models.py`
-- `vjepa2/evals/action_anticipation_frozen/metrics.py`
 
-## B2: Gaze Fusion
+### B2: Gaze Fusion
 
-用途：在 frozen V-JEPA2 encoder/predictor 后，将 gaze 信息接入 probe pooler 的 K/V 或输入侧视频表示，测试 gaze 是否改善 action anticipation。
+用途：在 frozen encoder/predictor 后，将 gaze 信息接入 probe pooler 的 K/V。
 
-### RNN Gaze Fuse
-
-方法：将 gaze trajectory 编码成 token，接入 probe cross-attention K/V。
+变体：RNN Gaze Fuse / MLP Gaze Fuse / Token Gate / Overlay / Video-token RNN
 
 运行脚本：
-
 - `scripts/run_hdepic_lora_rnn_gaze_train.slurm`
-- `scripts/run_hdepic_lora_gaze_val.slurm`
-
-常用配置：
-
-- `configs/generated/hdepic_lora_rnn_gaze.yaml`
-
-核心代码：
-
-- `app/hdepic_lora_action_anticipation/gaze_rnn.py`
-- `app/hdepic_lora_action_anticipation/gaze.py`
-- `app/hdepic_lora_action_anticipation/eval.py`
-
-### MLP Gaze Fuse
-
-方法：用较简单的 MLP / pooled gaze 表示替代 RNN trajectory encoder，用于判断 RNN 是否真正带来序列建模收益。
-
-运行脚本：
-
 - `scripts/run_hdepic_lora_mlp_gaze_train.slurm`
-
-常用配置：
-
-- `configs/generated/hdepic_lora_mlp_gaze.yaml`
-
-核心代码：
-
-- `app/hdepic_lora_action_anticipation/gaze_rnn.py`
-- `app/hdepic_lora_action_anticipation/gaze.py`
-
-### Token Gate
-
-方法：将 gaze 转成 token/gate 信号，而不是直接用 RNN fusion。
-
-运行脚本：
-
 - `scripts/run_hdepic_lora_token_gaze_train.slurm`
-
-常用配置：
-
-- `configs/generated/hdepic_lora_token_gaze.yaml`
-
-核心代码：
-
-- `app/hdepic_lora_action_anticipation/gaze.py`
-- `app/hdepic_lora_action_anticipation/gaze_rnn.py`
-
-### Overlay / Binary Overlay
-
-方法：离线或在线把 gaze map 叠到视频输入，作为像素空间的弱注入方式。
-
-运行脚本：
-
 - `scripts/run_hdepic_lora_overlay_gaze_train.slurm`
-- `scripts/run_hdepic_lora_binary_overlay_gaze_train.slurm`
-- `scripts/build_hdepic_gaze_overlays_cpu.slurm`
-- `scripts/build_hdepic_gaze_heatmap_cpu.slurm`
-- `scripts/build_hdepic_gaze_heatmap_video.py`
-
-常用配置：
-
-- `configs/generated/hdepic_lora_overlay_gaze_sigma96.yaml`
-- `configs/generated/hdepic_lora_binary_overlay_gaze_radius64.yaml`
-- `configs/generated/gaze_sigma96/hdepic_lora_valonly_1s.yaml`
 
 核心代码：
-
-- `app/hdepic_lora_action_anticipation/gaze.py`
-- `scripts/build_hdepic_gaze_heatmap_video.py`
-
-### Video-token RNN Variants
-
-方法：RNN gaze token 进一步与 video token 交互，例如 nearest-concat、gated-nearest、local-attention、residual-alpha 等。
-
-运行脚本：
-
-- `scripts/run_hdepic_lora_rnn_gaze_train.slurm`
-  - 通过 `GAZE_RNN_USE_VIDEO_TOKEN`、`GAZE_RNN_VIDEO_FUSION`、`GAZE_RNN_LOCAL_TEMPORAL_RADIUS`、`GAZE_RNN_RESIDUAL_ALPHA_INIT` 等环境变量切换变体。
-
-核心代码：
-
-- `app/hdepic_lora_action_anticipation/gaze_rnn.py`
-
-## B3: Long-Horizon Prediction
-
-用途：研究 3.5s、10s、60s 等更长 anticipation horizon。当前包括 val-only horizon、autoregressive rollout、past-window train/curriculum 等路径。
-
-运行脚本：
-
-- `scripts/run_hdepic_lora_val_horizons.slurm`: 多 horizon val-only / AR validation。
-- `scripts/run_hdepic_lora_ar_val_horizons.slurm`: autoregressive validation。
-- `scripts/run_hdepic_lora_past_window_baseline.slurm`: past-window baseline matrix。
-- `scripts/run_hdepic_lora_past_window_train.slurm`: past-window training / curriculum。
-- `scripts/run_hdepic_lora_past_window_parallel_debug_subset.slurm`: 2-GPU / debug-subset resource probe。
-
-常用配置：
-
-- `configs/generated/hdepic_lora_valonly_1s.yaml`
-- `configs/generated/hdepic_lora_valonly_3p5s.yaml`
-- `configs/generated/hdepic_lora_valonly_10s.yaml`
-- `configs/generated/hdepic_lora_ar_valonly_10s.yaml`
-- `configs/generated/past_window_baseline/*.yaml`
-- `configs/generated/past_window_train/*.yaml`
-
-核心代码：
-
-- `app/hdepic_lora_action_anticipation/modelcustom/vit_encoder_predictor_rollout.py`
-- `app/hdepic_lora_action_anticipation/eval.py`
+- `app/hdepic_lora_action_anticipation/gaze_rnn.py`（GazeTrajectoryLoader、GazeTrajectoryEncoder、GazeFusedAttentivePooler）
 - `app/hdepic_lora_action_anticipation/gaze.py`
 
-## B5: Binary Input Adapter
+### B3: Long-Horizon Prediction
 
-用途：把 gaze disk 或 distance map 作为额外输入通道，在 RGB 进入 frozen encoder 前用小 adapter 做条件化。它和 overlay 的区别是：overlay 直接改变视频像素；binary input adapter 是一个可训练的 RGB+map 残差适配器。
+用途：3.5s、10s、60s 等更长 anticipation horizon。
 
 运行脚本：
-
-- `scripts/run_hdepic_lora_binary_input_adapter_train.slurm`: 主训练入口。
-- `scripts/run_hdepic_lora_binary_input_adapter_distance_lr.slurm`: distance-map + adapter LR multiplier 变体。
-- `scripts/run_hdepic_lora_binary_input_adapter_train_augaware_smoke.slurm`: aug-aware smoke / resource probe。
-- `scripts/run_hdepic_lora_binary_input_adapter_zero_val.slurm`: zero-channel control。
-- `scripts/run_hdepic_binary_input_adapter_diagnostics.slurm`: adapter-space / coverage diagnostics。
-- `scripts/check_binary_adapter_latent_effect.slurm`: adapter 是否实际改变 latent 的检查。
-- `scripts/submit_b5_distance_lrm05_light_checks.sh`: distance-lrm05 light-check matrix。
-
-常用配置：
-
-- `configs/generated/hdepic_lora_binary_input_adapter_radius64.yaml`
-- `configs/generated/hdepic_lora_binary_input_adapter_radius64_gazefixed.yaml`
-- `configs/generated/hdepic_lora_binary_input_adapter_radius64_gazefixed_trainzeromap.yaml`
-- `configs/generated/hdepic_lora_binary_input_adapter_distance_lrmult05.yaml`
-- `configs/generated/hdepic_lora_binary_input_adapter_augaware_smoke*.yaml`
-- `configs/generated/hdepic_lora_binary_input_adapter_zero_val.yaml`
+- `scripts/run_hdepic_lora_val_horizons.slurm`
+- `scripts/run_hdepic_lora_ar_val_horizons.slurm`
+- `scripts/run_hdepic_lora_past_window_train.slurm`
 
 核心代码：
+- `app/hdepic_lora_action_anticipation/modelcustom/vit_encoder_predictor_rollout.py`（AutoregressiveAnticipativeWrapper）
 
-- `app/hdepic_lora_action_anticipation/binary_input_adapter.py`
-  - `BinaryMapInputAdapter`
-  - `BinaryInputAdaptedModel`
-  - `train_one_epoch_with_binary_input_adapter`
-  - per-head `tokens_proxy` gradient gating
+### B5: Binary Input Adapter
+
+用途：gaze disk 或 distance map 作为额外输入通道，在 RGB 进入 frozen encoder 前用小 adapter 做条件化。
+
+运行脚本：
+- `scripts/run_hdepic_lora_binary_input_adapter_train.slurm`
+- `scripts/run_hdepic_lora_binary_input_adapter_distance_lr.slurm`
+- `scripts/run_hdepic_lora_binary_input_adapter_zero_val.slurm`
+
+核心代码：
+- `app/hdepic_lora_action_anticipation/binary_input_adapter.py`（BinaryMapInputAdapter、BinaryInputAdaptedModel、tokens_proxy gradient gating）
 - `app/hdepic_lora_action_anticipation/binary_map_utils.py`
 - `app/hdepic_lora_action_anticipation/binary_map_aug.py`
-- `app/hdepic_lora_action_anticipation/binary_input_adapter_diagnostics.py`
-- `scripts/check_binary_adapter_latent_effect.py`
-- `scripts/analyze_binary_adapter_channels.py`
 
-相关稳定性代码：
+**已知问题：** disable_train_aug=true 导致 train/val gap ~34pt；zero-channel val 几乎等同正常 val，说明 gain 不能直接归因于 gaze channel。当前视为 dead-end 候选。
 
-- `app/hdepic_lora_action_anticipation/binary_input_adapter.py`
-- `app/hdepic_lora_action_anticipation/gaze.py`
+### B6: Future Latent Compare / Failure Analysis
 
-## B6: Future Latent Compare / Failure Analysis
-
-用途：不只看 final metrics，而是拆解 observed latent、predicted future latent、oracle future latent、head selection、label-window rescore 等失败来源。
+用途：拆解 observed latent、predicted future latent、oracle future latent 的差异和失败来源。
 
 运行脚本：
-
-- `scripts/run_hdepic_future_latent_compare.slurm`: observed / direct / AR / oracle latent 对比。
-- `scripts/run_hdepic_future_latent_failure_modes.slurm`: native 1s/10s failure-mode diagnostics。
-- `scripts/run_hdepic_lora_valonly_dump.slurm`: 导出 val prediction dump。
-- `scripts/run_hdepic_rescore_window_cpu.slurm`: 对 prediction dump 做 future-window label rescore。
-
-分析脚本：
-
-- `scripts/analyze_future_latent_failure_modes.py`
-- `scripts/analyze_prediction_dump.py`
-- `scripts/rescore_window.py`
-- `scripts/analyze_hdepic_label_priors.py`
-
-常用配置：
-
-- `configs/generated/future_latent_compare/hdepic_future_latent_compare.yaml`
-- `configs/generated/future_latent_compare/path_y_b1_clean_10s.yaml`
-- `configs/generated/future_latent_compare/path_y_b2_rnn_gaze_10s.yaml`
-- `configs/generated/future_latent_compare/path_y_b5_binary_adapter_10s.yaml`
-- `configs/generated/valonly_dump/*.yaml`
+- `scripts/run_hdepic_future_latent_compare.slurm`
+- `scripts/run_hdepic_future_latent_failure_modes.slurm`
+- `scripts/run_hdepic_lora_valonly_dump.slurm`
+- `scripts/run_hdepic_rescore_window_cpu.slurm`
 
 核心代码：
-
 - `app/hdepic_lora_action_anticipation/future_latent_compare.py`
-- `app/hdepic_lora_action_anticipation/modelcustom/vit_encoder_predictor_rollout.py`
 - `scripts/analyze_future_latent_failure_modes.py`
 - `scripts/rescore_window.py`
 
-## B7: Long-History Gaze
+### B7: Long-History Gaze
 
-用途：视频观察窗口不变，只延长 gaze history，测试更早的 gaze 是否包含 intention / task context。它和 B2 的区别是时间轴：B2 主要同窗口 gaze，B7 延长 gaze-only history。
+用途：视频观察窗口不变，只延长 gaze history（默认 20s）。
 
 运行脚本：
-
 - `scripts/run_hdepic_lora_rnn_long_gaze_train.slurm`
-  - 设置 `GAZE_RNN_HISTORY_SEC`。
-  - 默认禁用 video-token conditioning。
-  - 最后调用 `scripts/run_hdepic_lora_rnn_gaze_train.slurm` 共享路径。
 
-常用配置：
+### B8: Encoder-Output Gaze Injection
 
-- `configs/generated/hdepic_lora_rnn_long_gaze.yaml`
-
-核心代码：
-
-- `app/hdepic_lora_action_anticipation/gaze_rnn.py`
-- `app/hdepic_lora_action_anticipation/gaze.py`
-- `app/hdepic_lora_action_anticipation/eval.py`
-
-## B8: Encoder-Output Gaze Injection
-
-用途：把 gaze 注入点从 B2 的 probe-side 移到 encoder output 和 predictor input 之间。目标是让 gaze 影响 future-token prediction，而不是只影响最后的 classifier/pooler。
+用途：gaze 注入点在 encoder output 和 predictor input 之间，影响 future-token prediction。
 
 运行脚本：
-
 - `scripts/run_hdepic_lora_encoder_gaze_inject_train.slurm`
 
-常用配置：
-
-- `configs/generated/hdepic_lora_encoder_gaze_inject.yaml`
-
 核心代码：
+- `app/hdepic_lora_action_anticipation/encoder_output_gaze_adapter.py`（EncoderOutputGazeAdapter、EncoderOutputGazeAdaptedModel）
 
-- `app/hdepic_lora_action_anticipation/encoder_output_gaze_adapter.py`
-  - `EncoderOutputGazeAdapter`
-  - `EncoderOutputGazeAdaptedModel`
-- `app/hdepic_lora_action_anticipation/gaze_rnn.py`
-- `app/hdepic_lora_action_anticipation/eval.py`
+### B10: SLAM Pose / Multimodal RNN Fuse
 
-## B10: SLAM Pose / Multimodal RNN Fuse
-
-用途：把 SLAM closed-loop pose / head-motion trajectory 作为与 gaze 平行的模态，接入和 B2 类似的 late-fusion probe path。包含 pose-only 和 pose+gaze multimodal 两条路径。
+用途：SLAM closed-loop pose / head-motion trajectory 作为与 gaze 平行的模态，接入 late-fusion probe path。
 
 运行脚本：
-
-- `scripts/inspect_hdepic_slam_pose_data_cpu.slurm`: CPU audit / coverage scan。
-- `scripts/inspect_hdepic_slam_pose_data.py`: 本地/CPU 分析脚本。
-- `scripts/run_hdepic_lora_pose_smoke.slurm`: debug subset smoke。
-- `scripts/run_hdepic_lora_rnn_pose_train.slurm`: pose-only RNN fuse。
-- `scripts/run_hdepic_lora_rnn_multimodal_train.slurm`: gaze + pose multimodal RNN fuse。
-
-常用配置：
-
-- `configs/generated/hdepic_lora_rnn_pose.yaml`
-- `configs/generated/hdepic_lora_rnn_pose_smoke.yaml`
-- `configs/generated/hdepic_lora_rnn_multimodal.yaml`
+- `scripts/run_hdepic_lora_rnn_pose_train.slurm`
+- `scripts/run_hdepic_lora_rnn_multimodal_train.slurm`
 
 核心代码：
+- `app/hdepic_lora_action_anticipation/pose_slam.py`（SlamPoseLoader、PoseTrajectoryLoader、pose_6d/pose_vel/pose_full）
+- `app/hdepic_lora_action_anticipation/gaze_rnn.py`（PoseTrajectoryEncoder）
 
-- `app/hdepic_lora_action_anticipation/pose_slam.py`
-  - session mapping
-  - streaming zip read
-  - clip-relative pose features: `pose_6d`, `pose_vel`, `pose_full`
-- `app/hdepic_lora_action_anticipation/gaze_rnn.py`
-  - `PoseTrajectoryLoader`
-  - pose/gaze dual encoders
-  - multimodal token concatenation
-- `app/hdepic_lora_action_anticipation/eval.py`
-- `app/hdepic_lora_action_anticipation/gaze.py`
+### B5+B10 Hybrid
+
+用途：B5 binary map gaze（pixel adapter）+ B10 pose GRU（probe K/V）同时注入。
+
+运行脚本：
+- `scripts/run_hdepic_lora_binary_pose_train.slurm`
+- `scripts/submit_binary_pose_train_adaptive.sh`
+- `scripts/launch_binary_pose_train_watchdog.sh`
+
+GAZE_MODE: `binary_input_adapter_pose_rnn_fuse`
+
+---
+
+## Active：B11 及 ViT-L 新方法（2026-06-15 起）
+
+### B11: Encoder-LoRA + Interframe Pose Matrix
+
+当前主线。ViT-L/256 singleprobe，encoder-LoRA (rank=8, alpha=16, attn.qkv+attn.proj) + gaze/pose 5ch adapter。
+
+**方法：** 将相邻 video frame 之间的高频 SLAM 采样（~1000 Hz）打包为 `[K_max, D]` 矩阵，rasterize 到每帧左上角 patch，与 B5 binary gaze 合并为 5 通道 adapter 输入。probe 侧不再使用 pose GRU。
+
+**运行脚本：**
+- `scripts/run_hdepic_lora_binary_gaze_pose_matrix_train.slurm`：全量训练（w10, mem=768G, bs=2）
+- `scripts/run_hdepic_lora_binary_gaze_pose_matrix_smoke.slurm`：smoke test
+- `scripts/run_hdepic_lora_binary_gaze_pose_matrix_valonly_filtered.slurm`：formal filtered val
+- `scripts/run_hdepic_lora_b11_zero_aux_valonly.slurm`：zero-channel control（force_zero_map/force_zero_pose）
+- `scripts/run_hdepic_lora_b11_latent_effect.slurm`：latent effect diagnostic
+- `scripts/run_hdepic_singleprobe_1s_*.slurm`：singleprobe 1s 变体
+- `scripts/run_hdepic_singleprobe_ar10s_*.slurm`：AR 10s 变体
+
+**核心代码：**
+- `app/hdepic_lora_action_anticipation/binary_input_adapter.py`（5ch BinaryMapInputAdapter）
+- `app/hdepic_lora_action_anticipation/pose_slam.py`（query_interframe_matrices）
+- `app/hdepic_lora_action_anticipation/pose_map_builder.py`（InterframePoseMapBuilder、GazePoseInputMapBuilder）
+- `app/hdepic_lora_action_anticipation/encoder_lora.py`（inject_encoder_lora）
+- `app/hdepic_lora_action_anticipation/eval.py`（GAZE_MODE=binary_input_adapter_gaze_pose_matrix）
+
+### Encoder-LoRA
+
+在 frozen ViT encoder 中注入 trainable LoRA adapter（rank=8, alpha=16, lr_mult=0.5），target_suffixes=`attn.qkv, attn.proj`，不碰 MLP。与 JEPA_ARVR 参考实现对齐。
+
+**运行入口：** `scripts/run_hdepic_lora_probe.slurm` + `ENCODER_LORA_ENABLED=1`
+
+**核心代码：**
+- `app/hdepic_lora_action_anticipation/encoder_lora.py`
+- `app/hdepic_lora_action_anticipation/eval.py::LoRALinear`
+
+### Predictor-LoRA
+
+与 encoder-LoRA 相同的 LoRA 策略，但注入到 `model.predictor.predictor_blocks`（全部 12 blocks）。encoder 完全冻结。
+
+**运行入口：** `scripts/run_hdepic_lora_probe.slurm` + `PREDICTOR_LORA_ENABLED=1` + `ENCODER_LORA_ENABLED=0`
+
+**核心代码：**
+- `app/hdepic_lora_action_anticipation/predictor_lora.py`
+
+### LTM (Latent Memory) 实验
+
+**D3 诊断系列：**
+- D3-E11 latent distribution @10s：`scripts/run_d3_e11_latent_distribution_10s.slurm`
+- D3-E12 norm rescale @10s：`scripts/run_d3_e12_norm_rescale_10s.slurm`
+- D3-E14 ctx0 prediction dist @10s：`scripts/run_d3_e14_ctx0_prediction_dist_10s.slurm`
+- D3-E17 junk future @10s：`scripts/run_d3_e17_junk_future_10s.slurm`
+- D3-E18a direct probe train / valonly：`scripts/run_d3_e18a_direct_probe_train.slurm`
+- D3-E20 oracle probe train：`scripts/run_d3_e20_oracle_probe_train.slurm`
+
+---
+
+## 对齐参考（PhD-Reference Alignment）
+
+2026-06-15 起，HD-EPIC 路径默认对齐 JEPA_ARVR PhD 参考实现。详见 [docs/HD_EPIC_SYNC_NOTES.md](HD_EPIC_SYNC_NOTES.md) 和 VJEPA2-EXP `docs/HD_EPIC_REFERENCE_ALIGNMENT_DEBUG.md`。
+
+关键默认值变更：
+- `class_space=phd_reference`（全 taxonomy，非 train_only）
+- `temporal_sampling=phd_reference`（action-start anchor）
+- `split=p01_fixed`（固定 train/val/test 视频列表）
+- label source `primary_verb_noun`
+
+设置 `LORA_CLASS_SPACE=train_only` + `LORA_TEMPORAL_SAMPLING=legacy` 可退回旧行为（仅用于复现历史 run）。
+
+---
 
 ## 数据准备与健康检查脚本
 
-这些不是单独方法，但对复现实验很重要：
+- `scripts/download_hdepic_data_cpu.slurm`：HD-EPIC data download
+- `scripts/download_hdepic_gaze_cpu.slurm`：SLAM-and-Gaze data download
+- `scripts/download_ek100_vitg384_inference_ckpts.sh`：EK100 / V-JEPA checkpoint download
+- `scripts/refresh_hdepic_vjepa_annotations.slurm`：refresh V-JEPA 格式 annotations
+- `scripts/convert_hdepic_to_vjepa_csv.py`：annotation conversion（默认 `--split-preset p01_fixed`）
+- `scripts/check_hdepic_video_health.py` / `scripts/check_hdepic_video_health_cpu.slurm`：video health check
+- `scripts/inspect_hdepic_gaze_data.py` / `scripts/inspect_hdepic_gaze_data_cpu.slurm`：gaze coverage / sync audit
+- `scripts/inspect_hdepic_slam_pose_data.py` / `scripts/inspect_hdepic_slam_pose_data_cpu.slurm`：SLAM pose audit
+- `scripts/create_debug_subset.py` / `scripts/create_debug_subset_cpu.slurm`：deterministic debug subset
+- `configs/debug_subset_p01.json`：debug subset definition
 
-- `scripts/download_hdepic_data_cpu.slurm`: HD-EPIC data download。
-- `scripts/download_hdepic_gaze_cpu.slurm`: SLAM-and-Gaze data download。
-- `scripts/download_ek100_vitg384_inference_ckpts.sh`: EK100 / V-JEPA checkpoint download。
-- `scripts/refresh_hdepic_vjepa_annotations.slurm`: refresh V-JEPA 格式 annotations。
-- `scripts/convert_hdepic_to_vjepa_csv.py`: annotation conversion。
-- `scripts/check_hdepic_video_health.py` / `scripts/check_hdepic_video_health_cpu.slurm`: video health check。
-- `scripts/inspect_hdepic_gaze_data.py` / `scripts/inspect_hdepic_gaze_data_cpu.slurm`: gaze coverage / sync audit。
-- `scripts/create_debug_subset.py` / `scripts/create_debug_subset_cpu.slurm`: deterministic debug subset。
-- `configs/debug_subset_p01.json`: debug subset definition。
+---
 
 ## 给合作者的阅读顺序
 
-1. 先看本文档总览，确定感兴趣的方法对应哪些脚本和代码。
+1. 先看本文档总览和**当前标准**，确定感兴趣的方法对应哪些脚本和代码。
 2. 要复现实验，优先看对应 `scripts/run_*.slurm`，再看它引用的 `configs/generated/*.yaml`。
 3. 要理解模型改动，优先看 `app/hdepic_lora_action_anticipation/` 下对应模块。
-4. 数据准备和健康检查只需要看本文档列出的脚本入口即可。
+4. 中文超参对照看 [docs/human_readable_zh/超参表(zh).md](human_readable_zh/超参表(zh).md)。
+5. 近期 HPC 实验入口看 [docs/RECENT_RUNS.md](RECENT_RUNS.md)。
+6. 完整实验历史和指标去 VJEPA2-EXP 仓库看 `logs/DASHBOARD.md`。

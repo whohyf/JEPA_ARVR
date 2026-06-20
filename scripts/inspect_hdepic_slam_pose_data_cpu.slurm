@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=VJEPA2-EXP__hdepic_slam_pose_scan
-#SBATCH --account=torch_pr_674_tandon_advanced
+#SBATCH --account=your_slurm_account
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
@@ -24,10 +24,11 @@ ANNOTATIONS_DIR="${ANNOTATIONS_DIR:-${DATA_ROOT}/hdepic_vjepa_annotations}"
 SLAM_ROOT="${SLAM_ROOT:-${RAW_ROOT}/SLAM-and-Gaze/P01/SLAM/multi}"
 OUTPUT_DIR="${OUTPUT_DIR:-${DATA_ROOT}/hdepic_slam_inspection}"
 SAMPLE_ROWS="${SAMPLE_ROWS:-200}"
+INTERFRAME_K_MAX="${INTERFRAME_K_MAX:-128}"
 
 mkdir -p "${PROJECT_ROOT}/logs" "${OUTPUT_DIR}"
 
-export PROJECT_ROOT ENV_NAME DATA_ROOT RAW_ROOT ANNOTATIONS_DIR SLAM_ROOT OUTPUT_DIR SAMPLE_ROWS
+export PROJECT_ROOT ENV_NAME DATA_ROOT RAW_ROOT ANNOTATIONS_DIR SLAM_ROOT OUTPUT_DIR SAMPLE_ROWS INTERFRAME_K_MAX
 
 payload=$(cat <<'BASH'
 set -euo pipefail
@@ -41,7 +42,8 @@ python "${PROJECT_ROOT}/scripts/inspect_hdepic_slam_pose_data.py" \
     --annotations-dir "${ANNOTATIONS_DIR}" \
     --slam-root "${SLAM_ROOT}" \
     --output-dir "${OUTPUT_DIR}" \
-    --sample-rows "${SAMPLE_ROWS}"
+    --sample-rows "${SAMPLE_ROWS}" \
+    --interframe-k-max "${INTERFRAME_K_MAX}"
 
 echo "[slam-pose] Report: ${OUTPUT_DIR}/slam_pose_inspection.md"
 BASH

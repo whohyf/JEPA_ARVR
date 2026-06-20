@@ -94,8 +94,10 @@ def run(args):
     samples = _build_samples(annotations["val"])
     encoder, predictor = _load_encoder_predictor(cfg, device)
     gaze_components = _build_gaze_components(cfg, classifiers=[], device=device)
-    if gaze_components.get("mode") != "binary_input_adapter":
-        raise ValueError(f"Expected binary_input_adapter config, got mode={gaze_components.get('mode')!r}")
+    if gaze_components.get("mode") not in {"binary_input_adapter", "binary_input_adapter_gaze_pose_matrix"}:
+        raise ValueError(
+            f"Expected binary_input_adapter* config, got mode={gaze_components.get('mode')!r}"
+        )
     adapter = gaze_components["adapter"]
     map_builder = gaze_components["map_builder"]
     if adapter is None or map_builder is None:

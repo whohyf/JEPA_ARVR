@@ -658,8 +658,20 @@ class PoseTrajectoryLoader:
             sample_valid[i] = True
             n_raw = traj.shape[0]
             if n_raw > T:
-                idx = np.linspace(0, n_raw - 1, T).astype(np.int64)
-                padded[i] = torch.from_numpy(traj[idx])
+                # Avg pooling downsample (audio-style) instead of point picking.
+                # This reduces aliasing when raw SLAM sampling rate >> traj_len.
+                # traj: [N, D] -> padded: [T, D]
+                edges = np.linspace(0, n_raw, T + 1, dtype=np.float64)
+                out = np.zeros((T, D), dtype=np.float32)
+                for t in range(T):
+                    s = int(edges[t])
+                    e = int(edges[t + 1])
+                    if e <= s:
+                        e = min(s + 1, n_raw)
+                    seg = traj[s:e]
+                    # seg is never empty due to guard above
+                    out[t] = seg.mean(axis=0, dtype=np.float32)
+                padded[i] = torch.from_numpy(out)
                 lengths[i] = T
             else:
                 padded[i, :n_raw] = torch.from_numpy(traj)

@@ -1491,7 +1491,11 @@ def validate_with_gaze(
     pose_loader=None,
     hidden_dump=None,
     val_metric_scope: str = "native",
+    val_metric_aggregation: str = "metric_wise_max",
+    val_fixed_head_index: int | None = None,
 ):
+    from app.hdepic_lora_action_anticipation.val_metrics import summarize_val_metrics
+
     metric_scope = str(val_metric_scope).lower()
     if metric_scope not in {"native", "filtered"}:
         raise ValueError(f"Unsupported val_metric_scope={val_metric_scope!r}; expected native or filtered")
@@ -1612,13 +1616,13 @@ def validate_with_gaze(
     dumper.write()
     if hidden_dump is not None:
         hidden_dump.flush()
-    ret = {"action": {"accuracy": max(a["accuracy"] for a in action_metrics), "recall": max(a["recall"] for a in action_metrics)}}
-    ret["metric_scope"] = metric_scope
-    if action_is_verb_noun:
-        ret.update(
-            {
-                "verb": {"accuracy": max(v["accuracy"] for v in verb_metrics), "recall": max(v["recall"] for v in verb_metrics)},
-                "noun": {"accuracy": max(n["accuracy"] for n in noun_metrics), "recall": max(n["recall"] for n in noun_metrics)},
-            }
-        )
-    return ret
+    verb_arg = verb_metrics if action_is_verb_noun else None
+    noun_arg = noun_metrics if action_is_verb_noun else None
+    return summarize_val_metrics(
+        action_metrics,
+        verb_arg,
+        noun_arg,
+        metric_scope,
+        metric_aggregation=val_metric_aggregation,
+        val_fixed_head_index=val_fixed_head_index,
+    )

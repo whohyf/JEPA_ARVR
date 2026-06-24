@@ -26,15 +26,15 @@
 
 ## p01_fixed / PhD-Reference 对齐 Run
 
-### 1. RGB-only Probe-only Baseline（p01_fixed，冻结编码器）
+### 1. RGB-only Probe-only Baseline（p01_fixed，冻结编码器，**不加 LoRA**）
 
 | 项 | 值 |
 |---|---|
-| lora-tag | `hdepic-singleprobe-1s-p01fixed-rgbonly-probeonly-vitl-fp32-bs8-noac-10ep-w16` |
-| Job ID | 10993397 |
-| 提交脚本 | `scripts/submit_b11_singleprobe_1s_p01fixed_rgbonly_probeonly.sh` |
-| Config | `configs/generated/hdepic_singleprobe_1s_p01fixed_rgbonly_probeonly_l40s_vitl_fp32_bs8_noac_fulltrain.yaml` |
-| 说明 | 冻结编码器，只训练 probe。p01_fixed split。相当于参考 `LORA_RANK=0` baseline。 |
+| lora-tag | `hdepic-singleprobe-1s-p01fixed-rgbonly-probeonly-vitl-fp32-bs8-noac-10ep-w10`（tag 中 `-w10` 是 submit 脚本中默认字符串的 cosmetic bug，实际 worker 数为 16） |
+| Job ID | 10993397（chain：7 次 relaunch，3 次 cgroup OOM + 4 次 low-GPU-util kill，最终 w16/640GB/24cpu） |
+| 提交脚本 | `scripts/submit_b11_singleprobe_1s_p01fixed_rgbonly_probeonly_vitl_fp32_bs8_noac_fulltrain.sh` |
+| Config | `configs/generated/hdepic_singleprobe_1s_p01fixed_rgbonly_probeonly_vitl_fp32_bs8_noac_fulltrain.yaml`（**注意：不是 L40S 版**） |
+| 说明 | 冻结编码器（`ENCODER_LORA_ENABLED=0`），只训练 probe。p01_fixed split。相当于参考 `LORA_RANK=0` baseline。Test action Top1/Top3/R@5 = 9.90/18.53/12.68。 |
 
 ### 2. RGB-only Encoder-LoRA Baseline（p01_fixed）
 
@@ -42,9 +42,9 @@
 |---|---|
 | lora-tag | `hdepic-singleprobe-1s-p01fixed-rgbonly-encoderlora-vitl-fp32-bs8-noac-10ep-w16` |
 | Job ID | 10992528 |
-| 提交脚本 | `scripts/submit_b11_singleprobe_1s_p01fixed_rgbonly_encoderlora_resumable.sh`（位于 worktree `encoderlora-p01fixed-rgbonly-baseline`） |
-| Config | `configs/generated/hdepic_singleprobe_1s_p01fixed_rgbonly_encoderlora_vitl_fp32_bs8_noac_fulltrain.yaml` |
-| 说明 | encoder-LoRA (rank=8, alpha=16, attn.qkv+attn.proj, all blocks)。Encoder-LoRA 参数与 JEPA_ARVR 对齐。 |
+| 提交脚本 | `submit_b11_singleprobe_1s_p01fixed_rgbonly_encoderlora_resumable.sh` — ⚠️ 仅在 worktree `encoderlora-p01fixed-rgbonly-baseline` 中存在，未合并到主分支。核心参数：`ENCODER_LORA_ENABLED=1`, rank=8, alpha=16, lr_mult=0.5, `ENCODER_LORA_TARGET_SUFFIXES=attn.qkv\|attn.proj`, `ENCODER_LORA_LAST_N_BLOCKS=0`, `LORA_PROBE_TRAIN_MODE=full` |
+| Config | `configs/generated/hdepic_singleprobe_1s_p01fixed_rgbonly_encoderlora_vitl_fp32_bs8_noac_fulltrain.yaml` — ⚠️ 同样未在主分支 |
+| 说明 | encoder-LoRA counterpart to #1（frozen probe-only）。p01_fixed split。Test action Top1 = 11.27（比 frozen sibling #1 的 9.90 高 +1.37pp）。**可作为需要 encoder-lora p01_fixed submit 脚本时的参考参数来源。** |
 
 ### 3. RGB-only Probe-only Baseline（p01_fixed，L40S 并行副本）
 
@@ -184,12 +184,20 @@ python app/hdepic_lora_action_anticipation/eval_probe_checkpoint.py \
 
 ### 4. Legacy RGB-only Encoder-LoRA（legacy split）
 
+> **注意：** 虽然 lora-tag 中没有 "encoderlora" 字样，但 submit 脚本中 `ENCODER_LORA_ENABLED=1`，实际是 **encoder-LoRA** 而非 probe-only。
+
+```bash
+# 完整训练
+bash scripts/submit_b11_singleprobe_1s_legacy_rgbonly_vitl_fp32_bs8_noac_fulltrain.sh
+```
+
 | 项 | 值 |
 |---|---|
 | lora-tag | `hdepic-singleprobe-1s-legacy-rgbonly-vitl-fp32-bs8-noac-10ep-w10` |
-| Job ID | 10910499 |
-| 提交脚本 | `scripts/submit_b11_singleprobe_1s_legacy_rgbonly.sh` |
-| 说明 | legacy split (5744/1397)，显式设 `LORA_TEMPORAL_SAMPLING=legacy` + `LORA_CLASS_SPACE=train_only`。复现历史 job 10847438 的旧语义 baseline。 |
+| Job ID | 10910499（forked from 10905928, w4→w10） |
+| 提交脚本 | `scripts/submit_b11_singleprobe_1s_legacy_rgbonly_vitl_fp32_bs8_noac_fulltrain.sh` |
+| Config | `configs/generated/hdepic_singleprobe_1s_legacy_rgbonly_vitl_fp32_bs8_noac_fulltrain.yaml` |
+| 说明 | legacy split (5744/1397)，显式设 `LORA_TEMPORAL_SAMPLING=legacy` + `LORA_CLASS_SPACE=train_only`。**encoder-LoRA rank=8, alpha=16, all blocks, attn.qkv+attn.proj**。ep10 val action Top1/Top3 = 21.15/37.35。 |
 
 ### 5. Legacy Gaze+No-Pose（legacy split）
 
@@ -197,8 +205,8 @@ python app/hdepic_lora_action_anticipation/eval_probe_checkpoint.py \
 |---|---|
 | lora-tag | `hdepic-singleprobe-1s-legacy-gaze-nopose-vitl-fp32-bs8-noac-10ep-w4` |
 | Job ID | 10847438 |
-| 提交脚本 | `scripts/submit_b11_singleprobe_1s_legacy_gaze_nopose.sh` |
-| 说明 | gaze-only, no pose。encoder-LoRA + binary_input_adapter_gaze_pose_matrix (gaze channel only)。 |
+| 提交脚本 | ⚠️ 原始提交脚本 `submit_b11_singleprobe_1s_legacy_gaze_nopose.sh` 未在 `hdepic_exp_dev` 分支中保留（可能来自已删除的 worktree）。如需复现，参考 #4 legacy-rgbonly 的 submit 脚本并将 `GAZE_MODE` 改为对应的 gaze 模式、`ENCODER_LORA_ENABLED=1`。 |
+| 说明 | gaze-only, no pose。encoder-LoRA + binary_input_adapter_gaze_pose_matrix (gaze channel only)。legacy split (5744/1397)。**encoder-LoRA enabled**，不仅是 probe-only。 |
 
 ### 6. Legacy Gaze+Pose+Reg（legacy split，含 confidence penalty）
 
@@ -237,11 +245,16 @@ bash scripts/submit_b11_singleprobe_1s_legacy_rgbonly_predictorlora_resumable.sh
 
 ### 8. AR10s Direct-Rope（legacy split）
 
+```bash
+bash scripts/submit_b11_singleprobe_ar10s_direct_rope_vitl_fp32_bs8_noac_fulltrain.sh
+```
+
 | 项 | 值 |
 |---|---|
 | lora-tag | `hdepic-singleprobe-ar10s-direct-rope-vitl-fp32-bs8-noac-10ep-w4-tr8-10` |
 | Job ID | 10825859 |
-| Config | `configs/generated/hdepic_singleprobe_ar10s_direct_rope_gaze_pose_enclora_fulltrain.yaml` |
+| 提交脚本 | `scripts/submit_b11_singleprobe_ar10s_direct_rope_vitl_fp32_bs8_noac_fulltrain.sh` |
+| Config | `configs/generated/hdepic_singleprobe_ar10s_direct_rope_gaze_pose_enclora_fulltrain.yaml` ⚠️ 此 config 文件未保留在仓库中 |
 | 说明 | direct_rope 10s forward path。⚠️ legacy split，predates `8f1adea` 对齐修复。 |
 
 ### 9. AR10s Sliding Window（legacy split，resource probe）

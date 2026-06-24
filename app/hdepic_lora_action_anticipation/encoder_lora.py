@@ -20,7 +20,7 @@ from src.utils.logging import AverageMeter
 logger = logging.getLogger(__name__)
 
 # PhD-reference / JEPA_ARVR aligned default: inject LoRA only into attention
-# qkv + proj (NOT the MLP). See docs/HD_EPIC_SYNC_NOTES.md "Reference-aligned
+# qkv + proj (NOT the MLP). See docs/PHD_CODE_COMPARISON.md "Encoder-LoRA
 # hyper-parameter table". The legacy ViT-G default also wrapped mlp.fc1/fc2.
 _DEFAULT_TARGET_SUFFIXES = ("attn.qkv", "attn.proj")
 _ENCODER_LORA_FLAG = "_is_encoder_lora"

@@ -4,7 +4,7 @@ tasks_per_node: 2
 cpus_per_task: 24
 tag: hdepic-ar10s-ddp2-bs16-w4-smoke-i150
 eval_name: app.hdepic_lora_action_anticipation
-folder: /path/to/VJEPA2-EXP/outputs/hdepic_lora_action_anticipation
+folder: /scratch/yh6416/VJEPA2-EXP/outputs/hdepic_lora_action_anticipation
 resume_checkpoint: false
 experiment:
   classifier:
@@ -17,9 +17,9 @@ experiment:
     auto_augment: true
     file_format: 1
     dataset: EK100
-    base_path: /path/to/VJEPA2-EXP/data/hdepic_vjepa_videos
-    dataset_train: /path/to/VJEPA2-EXP/data/hdepic_vjepa_annotations/HD_EPIC_train_vjepa.csv
-    dataset_val: /path/to/VJEPA2-EXP/data/hdepic_vjepa_annotations/HD_EPIC_val_vjepa.csv
+    base_path: /scratch/yh6416/VJEPA2-EXP/data/hdepic_vjepa_videos
+    dataset_train: /scratch/yh6416/VJEPA2-EXP/data/hdepic_vjepa_annotations/HD_EPIC_train_vjepa.csv
+    dataset_val: /scratch/yh6416/VJEPA2-EXP/data/hdepic_vjepa_annotations/HD_EPIC_val_vjepa.csv
     frames_per_clip: 32
     frames_per_second: 8
     motion_shift: false
@@ -78,7 +78,7 @@ experiment:
     prediction_dump:
       enabled: false
 model_kwargs:
-  checkpoint: /path/to/VJEPA2-EXP/checkpoints/vitg-384.pt
+  checkpoint: /scratch/yh6416/VJEPA2-EXP/checkpoints/vitg-384.pt
   module_name: app.hdepic_lora_action_anticipation.modelcustom.vit_encoder_predictor_rollout
   wrapper_kwargs:
     no_predictor: false
